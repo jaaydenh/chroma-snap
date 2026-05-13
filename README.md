@@ -1,0 +1,105 @@
+# Chroma Snap
+
+Chroma Snap is an Apache-2.0, open-source codebase for a hosted-first visual regression gate for Storybook 10/Vite projects. The v1 product shape is intentionally narrow: GitHub Actions + GitHub App, Chromium-only Storybook screenshots, server-side diffing, hosted review, strict GitHub Checks, private artifacts, approvals, auditability, and base-branch baseline promotion.
+
+This repository currently implements the first runnable slice of that plan:
+
+- Shared typed config, manifest, upload, baseline, diff, and review protocol models.
+- An experimental Storybook 10/Vite Vitest browser-mode capture adapter with an automatic `afterEach` screenshot hook.
+- A CLI that initializes config, runs capture commands, normalizes capture events into manifests, and uploads to an API.
+- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, and queue records.
+- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, and seeds local baselines.
+- A simple hosted-review HTML renderer/server for comparison reports.
+- A GitHub Action wrapper and example workflow.
+
+The code is open from day one, but production-grade self-hosting is not claimed yet. The local API uses file-backed storage and a development OIDC seam so the core protocol can be exercised before PostgreSQL, S3, queues, GitHub App webhooks, and hosted deployment hardening are added.
+
+## Monorepo layout
+
+```text
+packages/shared                  Config, manifest, upload, review, hashing types
+packages/capture-storybook-vitest Experimental Storybook 10/Vite Vitest browser capture adapter
+packages/cli                     Local and CI command runner
+packages/action                  GitHub Action wrapper around the CLI
+apps/api                         Upload-session API skeleton
+apps/worker                      Diff worker and local baseline processor
+apps/web                         Static review report renderer/server
+infra                            Hosted deployment and future self-hosting notes
+docs                             Protocol and milestone notes
+examples                         Example visual config
+```
+
+## Quick start for development
+
+```bash
+npm install
+npm run build
+npm test
+```
+
+Create starter files in a Storybook 10/Vite repo:
+
+```bash
+npx chroma-snap init
+```
+
+Run capture without invoking Storybook, using any existing adapter events file:
+
+```bash
+npx chroma-snap capture --config visual.config.ts --no-run
+```
+
+Run the local API in one terminal:
+
+```bash
+CHROMA_SNAP_DEV_AUTH=1 node apps/api/dist/index.js
+```
+
+Upload a manifest in another terminal:
+
+```bash
+CHROMA_SNAP_DEV_AUTH=1 npx chroma-snap upload --manifest .chroma-snap/capture/manifest.json --service-url http://127.0.0.1:4007
+```
+
+Process a manifest locally and seed base-branch baselines:
+
+```bash
+node apps/worker/dist/index.js --manifest .chroma-snap/capture/manifest.json --seed-baselines
+```
+
+Serve the generated review report:
+
+```bash
+node apps/web/dist/index.js
+```
+
+## Storybook 10/Vite capture spike
+
+The v1 capture adapter is deliberately isolated in `packages/capture-storybook-vitest`. It tries the plan's highest-priority spike path: install a Vitest browser-mode `afterEach` hook, infer story metadata from the Vitest task context, wait for fonts, pause animations, take a Chromium screenshot, and emit a JSONL capture event for the CLI.
+
+The adapter is still marked experimental because the final public API for automatic no-helper screenshots must be validated against representative Storybook 10/Vite projects. See [`docs/milestone-0-spike.md`](docs/milestone-0-spike.md).
+
+## V1 workflow target
+
+1. Install the GitHub App and add the GitHub Action.
+2. The action authenticates with GitHub Actions OIDC, loads `visual.config.ts`, and runs Storybook/Vitest browser-mode capture.
+3. Screenshots and concise logs upload through a scoped upload session.
+4. The worker compares screenshots to accepted base-branch baselines.
+5. The hosted review UI shows changed, new, deleted, errored, pending, and unchanged snapshots.
+6. Authorized GitHub users approve or reject changes.
+7. The GitHub Check remains strict: pending while processing or awaiting approval, success when clean or approved, failure for rejected/capture/error/invalid builds.
+8. Approved PR snapshots are promoted only after the approved commit lands on the base branch and a base-branch run confirms them.
+
+## What is intentionally deferred
+
+- Production PostgreSQL schema and migrations.
+- S3-compatible object storage implementation and lifecycle policies.
+- Durable queue integration.
+- GitHub App installation flow, webhooks, permission checks, and Checks API updates.
+- Production OIDC signature verification and GitHub App installation verification.
+- Full React review UI with approvals, audit log, keyboard navigation, and signed artifact URLs.
+- Billing, SSO, SCIM, SOC2 exports, Helm, HA, and supported production self-hosting.
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).

@@ -1,0 +1,29 @@
+{
+  "name": "@chroma-snap/capture-storybook-vitest",
+  "version": "0.1.0",
+  "description": "Experimental Storybook 10/Vite Vitest browser-mode capture adapter.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@chroma-snap/shared": "0.1.0"
+  },
+  "peerDependencies": {
+    "@vitest/browser": ">=4.0.0",
+    "vitest": ">=4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@vitest/browser": { "optional": true },
+    "vitest": { "optional": true }
+  },
+  "files": ["dist"]
+}

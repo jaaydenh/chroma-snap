@@ -1,0 +1,26 @@
+{
+  "name": "@chroma-snap/cli",
+  "version": "0.1.0",
+  "description": "CLI for local and CI Chroma Snap capture, manifest, and upload workflows.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "chroma-snap": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b && chmod +x dist/index.js",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@chroma-snap/capture-storybook-vitest": "0.1.0",
+    "@chroma-snap/shared": "0.1.0",
+    "jiti": "^2.6.1"
+  },
+  "files": ["dist"]
+}

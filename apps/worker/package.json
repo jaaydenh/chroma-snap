@@ -1,0 +1,23 @@
+{
+  "name": "@chroma-snap/worker",
+  "version": "0.1.0",
+  "description": "Diff worker and local baseline processor for Chroma Snap.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@chroma-snap/shared": "0.1.0",
+    "pixelmatch": "^7.1.0",
+    "pngjs": "^7.0.0"
+  },
+  "files": ["dist"]
+}

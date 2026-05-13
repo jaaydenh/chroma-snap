@@ -1,0 +1,25 @@
+name: Chroma Snap Visual Tests
+description: Capture Storybook 10/Vite visual snapshots and upload them to Chroma Snap.
+author: Chroma Snap
+inputs:
+  config-path:
+    description: Path to visual.config.ts or visual.config.json.
+    required: false
+    default: visual.config.ts
+  service-url:
+    description: Hosted Chroma Snap API URL.
+    required: true
+  upload:
+    description: Whether to upload after capture.
+    required: false
+    default: "true"
+  manifest-path:
+    description: Manifest output path.
+    required: false
+    default: .chroma-snap/capture/manifest.json
+runs:
+  using: node20
+  main: dist/index.js
+branding:
+  icon: camera
+  color: purple

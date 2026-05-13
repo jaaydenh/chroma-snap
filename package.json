@@ -1,0 +1,26 @@
+{
+  "name": "chroma-snap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Open-source, hosted-first visual regression gate for Storybook 10/Vite projects.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "npm run clean --workspaces --if-present",
+    "typecheck": "tsc -b --pretty false",
+    "test": "npm run build && node --test tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/pngjs": "^6.0.5",
+    "typescript": "^5.8.3"
+  }
+}
