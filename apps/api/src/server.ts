@@ -4,13 +4,16 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   assertValidManifest,
+  FileArtifactStore,
+  type ArtifactStore,
   type CreateUploadSessionRequest,
   type FinalizeUploadSessionRequest,
   type FinalizeUploadSessionResponse,
-  type UploadArtifactIntent,
   type UploadSessionResponse,
 } from "@chroma-snap/shared";
 import { decodeJwtPayloadWithoutVerifying, validateGitHubActionsOidcClaims } from "./oidc.js";
+import { objectKeyForArtifact, type StoredSession } from "./session.js";
+import { verifyUploadIntegrity } from "./upload-integrity.js";
 
 export interface ApiServerOptions {
   host?: string;
@@ -19,28 +22,21 @@ export interface ApiServerOptions {
   publicUrl?: string;
   /** Development-only escape hatch for local CLI tests without GitHub OIDC. */
   allowDevAuth?: boolean;
+  artifactStore?: ArtifactStore;
   oidcAudience?: string;
-}
-
-interface StoredSession {
-  sessionId: string;
-  buildId: string;
-  createdAt: string;
-  expiresAt: string;
-  request: CreateUploadSessionRequest;
-  artifacts: UploadArtifactIntent[];
-  finalized: boolean;
 }
 
 export async function startApiServer(options: ApiServerOptions = {}): Promise<{ server: Server; url: string }> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4007;
   const storageDir = resolve(options.storageDir ?? ".chroma-snap/server");
+  const artifactStore = options.artifactStore ?? new FileArtifactStore(storageDir);
+  let publicUrl = options.publicUrl ?? `http://${host}:${port}`;
   await mkdir(storageDir, { recursive: true });
 
   const server = createServer(async (req, res) => {
     try {
-      await route(req, res, { ...options, host, port, storageDir, publicUrl: options.publicUrl ?? `http://${host}:${port}` });
+      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore });
     } catch (error) {
       sendJson(res, error instanceof HttpError ? error.status : 500, {
         error: error instanceof Error ? error.message : String(error),
@@ -49,10 +45,17 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
   });
 
   await new Promise<void>((resolveListen) => server.listen(port, host, resolveListen));
-  return { server, url: options.publicUrl ?? `http://${host}:${port}` };
+  const address = server.address();
+  const actualPort = typeof address === "object" && address ? address.port : port;
+  publicUrl = options.publicUrl ?? `http://${host}:${actualPort}`;
+  return { server, url: publicUrl };
 }
 
-async function route(req: IncomingMessage, res: ServerResponse, options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl">> & ApiServerOptions): Promise<void> {
+async function route(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore">> & ApiServerOptions,
+): Promise<void> {
   const url = new URL(req.url ?? "/", options.publicUrl);
 
   if (req.method === "GET" && url.pathname === "/healthz") {
@@ -71,7 +74,7 @@ async function route(req: IncomingMessage, res: ServerResponse, options: Require
   const uploadMatch = url.pathname.match(/^\/v1\/upload-sessions\/([^/]+)\/artifacts\/([^/]+)$/);
   if (req.method === "PUT" && uploadMatch) {
     const [, sessionId, artifactId] = uploadMatch;
-    await putArtifact(req, options.storageDir, sessionId!, artifactId!);
+    await putArtifact(req, options.storageDir, options.artifactStore, sessionId!, artifactId!);
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -109,7 +112,11 @@ async function createUploadSession(body: CreateUploadSessionRequest, options: Re
     createdAt: new Date().toISOString(),
     expiresAt,
     request: body,
-    artifacts: body.artifacts ?? [],
+    artifacts: (body.artifacts ?? []).map((artifact) => ({
+      ...artifact,
+      objectKey: objectKeyForArtifact(sessionId, artifact.id, body),
+      status: "pending" as const,
+    })),
     finalized: false,
   };
 
@@ -123,24 +130,29 @@ async function createUploadSession(body: CreateUploadSessionRequest, options: Re
       method: "PUT" as const,
       url: `${options.publicUrl}/v1/upload-sessions/${sessionId}/artifacts/${encodeURIComponent(artifact.id)}`,
       headers: { "content-type": artifact.contentType },
-      objectKey: objectKeyForArtifact(sessionId, artifact.id),
+      objectKey: artifact.objectKey,
       expiresAt,
     })),
   };
 }
 
-async function putArtifact(req: IncomingMessage, storageDir: string, sessionId: string, artifactId: string): Promise<void> {
+async function putArtifact(req: IncomingMessage, storageDir: string, artifactStore: ArtifactStore, sessionId: string, artifactId: string): Promise<void> {
   const session = await readJsonFile<StoredSession>(sessionPath(storageDir, sessionId));
   if (new Date(session.expiresAt).getTime() < Date.now()) {
     throw new HttpError(410, "Upload session expired.");
   }
-  if (!session.artifacts.some((artifact) => artifact.id === artifactId)) {
+  const artifact = session.artifacts.find((item) => item.id === artifactId);
+  if (!artifact) {
     throw new HttpError(404, "Artifact is not part of this upload session.");
   }
 
-  const target = resolve(storageDir, objectKeyForArtifact(sessionId, artifactId));
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, await readBody(req));
+  const stored = await artifactStore.putArtifact(artifact.objectKey, await readBody(req));
+  artifact.status = "uploaded";
+  artifact.actualSha256 = stored.sha256;
+  artifact.actualByteSize = stored.byteSize;
+  artifact.uploadedAt = new Date().toISOString();
+  artifact.verificationError = undefined;
+  await writeJsonFile(sessionPath(storageDir, sessionId), session);
 }
 
 async function finalizeUploadSession(
@@ -162,6 +174,12 @@ async function finalizeUploadSession(
   }
   if (body.manifest.git.commitSha !== session.request.git.commitSha) {
     throw new HttpError(400, "Manifest commit SHA does not match upload session.");
+  }
+
+  const integrity = await verifyUploadIntegrity(session, body.manifest, options.artifactStore!);
+  await writeJsonFile(sessionPath(options.storageDir, sessionId), session);
+  if (!integrity.ok) {
+    throw new HttpError(400, `Artifact integrity check failed:\n${integrity.errors.map((error) => `- ${error}`).join("\n")}`);
   }
 
   const buildDir = resolve(options.storageDir, "builds", session.buildId);
@@ -212,10 +230,6 @@ async function assertUploadAuth(req: IncomingMessage, options: ApiServerOptions)
   if (process.env.CHROMA_SNAP_ALLOW_UNSIGNED_OIDC !== "1") {
     throw new HttpError(501, "OIDC claim parsing is present, but signature verification is not enabled in this local MVP. Set CHROMA_SNAP_ALLOW_UNSIGNED_OIDC=1 only for local testing.");
   }
-}
-
-function objectKeyForArtifact(sessionId: string, artifactId: string): string {
-  return `artifacts/${sessionId}/${artifactId}`;
 }
 
 function sessionPath(storageDir: string, sessionId: string): string {

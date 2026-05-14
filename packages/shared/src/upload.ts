@@ -27,6 +27,15 @@ export interface UploadTarget {
   expiresAt: string;
 }
 
+export interface UploadArtifactStatus extends UploadArtifactIntent {
+  status: "pending" | "uploaded" | "verified" | "failed";
+  objectKey: string;
+  actualSha256?: string;
+  actualByteSize?: number;
+  uploadedAt?: string;
+  verificationError?: string;
+}
+
 export interface UploadSessionResponse {
   sessionId: string;
   buildId: string;

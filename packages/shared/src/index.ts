@@ -1,3 +1,4 @@
+export * from "./artifact-storage.js";
 export * from "./config.js";
 export * from "./hash.js";
 export * from "./manifest.js";
