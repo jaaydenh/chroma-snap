@@ -21,6 +21,11 @@ export default defineConfig({
       globals: { theme: "dark" },
     },
   ],
+  capture: {
+    settleDelayMs: 0,
+    waitForFonts: true,
+    pauseAnimations: true,
+  },
   thresholds: {
     maxDiffPixels: 100,
     maxDiffPixelRatio: 0.001,

@@ -1,8 +1,24 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { extname, resolve } from "node:path";
 import type { ComparisonReport } from "@chroma-snap/shared";
 import { renderReportHtml } from "./render.js";
+
+function contentTypeFor(path: string): string {
+  switch (extname(path).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".json":
+      return "application/json; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
+}
 
 export interface WebServerOptions {
   host?: string;
@@ -20,6 +36,20 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<{ 
       if (url.pathname === "/healthz") {
         res.setHeader("content-type", "application/json");
         res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+      if (url.pathname === "/artifact") {
+        const requestedPath = url.searchParams.get("path");
+        if (!requestedPath) {
+          res.statusCode = 400;
+          res.end("Missing artifact path");
+          return;
+        }
+        const artifactPath = requestedPath.startsWith("/") ? requestedPath : resolve(reportsDir, requestedPath);
+        const bytes = await readFile(artifactPath);
+        res.setHeader("content-type", contentTypeFor(artifactPath));
+        res.setHeader("cache-control", "no-store");
+        res.end(bytes);
         return;
       }
       if (url.pathname === "/" || url.pathname === "/report") {

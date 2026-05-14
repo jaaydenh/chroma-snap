@@ -149,7 +149,7 @@ async function compareSnapshot(
       current: snapshot,
       baseline,
       requiresApproval: false,
-      message: snapshot.error?.message ?? "Capture failed.",
+      message: formatCaptureErrorMessage(snapshot),
     };
   }
 
@@ -162,7 +162,7 @@ async function compareSnapshot(
       current: snapshot,
       baseline,
       requiresApproval: false,
-      message: "Captured snapshot is missing image.sha256.",
+      message: formatCaptureErrorMessage(snapshot),
     };
   }
 
@@ -260,6 +260,32 @@ async function readBaselineStore(path: string): Promise<BaselineStore> {
 async function writeBaselineStore(path: string, store: BaselineStore): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+}
+
+export function formatCaptureErrorMessage(snapshot: SnapshotManifestEntry): string {
+  const parts: string[] = [];
+  if (snapshot.error?.message) {
+    parts.push(snapshot.error.message);
+  } else if (snapshot.status === "captured") {
+    parts.push("Captured snapshot is missing image.sha256. Check capture adapter output and upload integrity.");
+  } else {
+    parts.push("Capture failed without an error message. Check runner logs for this story and mode.");
+  }
+
+  if (snapshot.error?.code) {
+    parts.push(`Code: ${snapshot.error.code}`);
+  }
+  if (snapshot.error?.timeoutMs !== undefined) {
+    parts.push(`Timeout: ${snapshot.error.timeoutMs}ms`);
+  }
+  if (snapshot.error?.stack) {
+    parts.push(`Stack:\n${snapshot.error.stack.split("\n").slice(0, 8).join("\n")}`);
+  }
+  if (snapshot.error?.logExcerpt) {
+    parts.push(`Logs:\n${snapshot.error.logExcerpt.split("\n").slice(-12).join("\n")}`);
+  }
+
+  return parts.join("\n\n");
 }
 
 function resolveImagePath(path: string | undefined, manifestDir: string): string | undefined {

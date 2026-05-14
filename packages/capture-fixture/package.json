@@ -1,0 +1,21 @@
+{
+  "name": "@chroma-snap/capture-fixture",
+  "version": "0.1.0",
+  "description": "Lightweight fixture capture adapter for repeatable Chroma Snap validation without Storybook.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "@chroma-snap/shared": "0.1.0"
+  },
+  "files": ["dist"]
+}

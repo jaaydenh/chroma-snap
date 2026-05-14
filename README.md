@@ -19,6 +19,7 @@ The code is open from day one, but production-grade self-hosting is not claimed 
 ```text
 packages/shared                  Config, manifest, upload, review, hashing types
 packages/capture-storybook-vitest Experimental Storybook 10/Vite Vitest browser capture adapter
+packages/capture-fixture         Lightweight fixture adapter for repeatable local validation
 packages/cli                     Local and CI command runner
 packages/action                  GitHub Action wrapper around the CLI
 apps/api                         Upload-session API skeleton
@@ -49,6 +50,12 @@ Run capture without invoking Storybook, using any existing adapter events file:
 npx chroma-snap capture --config visual.config.ts --no-run
 ```
 
+Run the lightweight fixture/dogfood capture workflow without Storybook:
+
+```bash
+npm run test:fixture-capture
+```
+
 Run the local API in one terminal:
 
 ```bash
@@ -75,9 +82,9 @@ node apps/web/dist/index.js
 
 ## Storybook 10/Vite capture spike
 
-The v1 capture adapter is deliberately isolated in `packages/capture-storybook-vitest`. It tries the plan's highest-priority spike path: install a Vitest browser-mode `afterEach` hook, infer story metadata from the Vitest task context, wait for fonts, pause animations, take a Chromium screenshot, and emit a JSONL capture event for the CLI.
+The v1 capture adapter is deliberately isolated in `packages/capture-storybook-vitest`. The real Storybook 10/Vite spike has been validated externally, and the chosen hook is a Vitest browser-mode setup hook: `beforeEach` applies mode context where possible and `afterEach` captures the final rendered state after render/play completion.
 
-The adapter is still marked experimental because the final public API for automatic no-helper screenshots must be validated against representative Storybook 10/Vite projects. See [`docs/milestone-0-spike.md`](docs/milestone-0-spike.md).
+The adapter remains experimental while Milestone 1 hardening continues. See [`docs/milestone-0-spike.md`](docs/milestone-0-spike.md).
 
 ## V1 workflow target
 

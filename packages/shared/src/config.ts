@@ -70,6 +70,8 @@ export interface CaptureConfig {
   timeoutMs?: number;
   pauseAnimations?: boolean;
   waitForFonts?: boolean;
+  /** Extra post-render settle time before screenshotting. Defaults to 0 for speed. */
+  settleDelayMs?: number;
 }
 
 export interface ProjectConfig {
@@ -144,6 +146,7 @@ export function normalizeConfig(config: VisualConfig = {}): NormalizedVisualConf
       timeoutMs: config.capture?.timeoutMs ?? 30_000,
       pauseAnimations: config.capture?.pauseAnimations ?? true,
       waitForFonts: config.capture?.waitForFonts ?? true,
+      settleDelayMs: config.capture?.settleDelayMs ?? 0,
     },
     modes: (config.modes?.length ? config.modes : [DEFAULT_MODE]).map((mode) => ({
       ...mode,
@@ -188,6 +191,10 @@ export function validateConfig(config: VisualConfig): ValidationResult<Normalize
 
   if (!Number.isInteger(normalized.capture.timeoutMs) || normalized.capture.timeoutMs < 1_000) {
     errors.push("capture.timeoutMs must be an integer of at least 1000ms.");
+  }
+
+  if (!Number.isInteger(normalized.capture.settleDelayMs) || normalized.capture.settleDelayMs < 0) {
+    errors.push("capture.settleDelayMs must be a non-negative integer.");
   }
 
   const seenModes = new Set<string>();

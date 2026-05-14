@@ -113,6 +113,7 @@ export interface SnapshotManifestEntry {
   timings?: {
     renderMs?: number;
     playMs?: number;
+    prepareMs?: number;
     captureMs?: number;
     totalMs?: number;
   };

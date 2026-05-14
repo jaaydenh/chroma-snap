@@ -18,6 +18,7 @@
   "references": [
     { "path": "packages/shared" },
     { "path": "packages/capture-storybook-vitest" },
+    { "path": "packages/capture-fixture" },
     { "path": "packages/cli" },
     { "path": "packages/action" },
     { "path": "apps/api" },

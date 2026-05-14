@@ -64,7 +64,7 @@ async function initCommand(args: ParsedArgs): Promise<void> {
 
   await writeFileIfMissing(
     setupPath,
-    `import { installVitestAutoCapture } from "@chroma-snap/capture-storybook-vitest";\n\nconst mode = JSON.parse(process.env.CHROMA_SNAP_MODE ?? '{"name":"default","viewport":{"width":1280,"height":720}}');\n\nawait installVitestAutoCapture({\n  outputDir: process.env.CHROMA_SNAP_CAPTURE_OUTPUT_DIR,\n  eventsFile: process.env.CHROMA_SNAP_CAPTURE_EVENTS,\n  mode,\n});\n`,
+    `import { installVitestAutoCapture } from "@chroma-snap/capture-storybook-vitest";\n\nconst modeRaw = process.env.CHROMA_SNAP_MODE ?? '{"name":"default","viewport":{"width":1280,"height":720,"deviceScaleFactor":1},"colorScheme":"light","globals":{}}';\nlet mode;\ntry {\n  mode = JSON.parse(modeRaw);\n} catch (error) {\n  throw new Error(\`Invalid CHROMA_SNAP_MODE JSON: \${error instanceof Error ? error.message : String(error)}\`);\n}\n\nawait installVitestAutoCapture({\n  outputDir: process.env.CHROMA_SNAP_CAPTURE_OUTPUT_DIR,\n  eventsFile: process.env.CHROMA_SNAP_CAPTURE_EVENTS,\n  mode,\n  waitForFonts: true,\n  pauseAnimations: true,\n  settleDelayMs: Number(process.env.CHROMA_SNAP_SETTLE_DELAY_MS ?? 0),\n});\n`,
   );
 
   await writeFileIfMissing(
@@ -99,6 +99,7 @@ async function captureCommand(args: ParsedArgs): Promise<void> {
           ...process.env,
           CHROMA_SNAP_CAPTURE_OUTPUT_DIR: outputDir,
           CHROMA_SNAP_CAPTURE_EVENTS: eventsFile,
+          CHROMA_SNAP_SETTLE_DELAY_MS: String(normalized.capture.settleDelayMs),
           CHROMA_SNAP_MODE: JSON.stringify(mode),
         },
       });
@@ -115,7 +116,10 @@ async function captureCommand(args: ParsedArgs): Promise<void> {
   assertValidManifest(manifest);
   await mkdir(dirname(manifestPath), { recursive: true });
   await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
-  console.log(`Wrote ${manifest.snapshots.length} snapshots to ${manifestPath}.`);
+  const captured = manifest.snapshots.filter((snapshot) => snapshot.status === "captured").length;
+  const errored = manifest.snapshots.filter((snapshot) => snapshot.status === "errored").length;
+  const bytes = manifest.snapshots.reduce((sum, snapshot) => sum + (snapshot.image?.byteSize ?? 0), 0);
+  console.log(`Wrote ${manifest.snapshots.length} snapshots (${captured} captured, ${errored} errored, ${bytes} bytes) to ${manifestPath}.`);
 }
 
 async function uploadCommand(args: ParsedArgs): Promise<void> {
@@ -169,6 +173,7 @@ async function writeVitestSetupCommand(args: ParsedArgs): Promise<void> {
     mode: normalized.modes[0],
     waitForFonts: normalized.capture.waitForFonts,
     pauseAnimations: normalized.capture.pauseAnimations,
+    settleDelayMs: normalized.capture.settleDelayMs,
     timeoutMs: normalized.capture.timeoutMs,
   });
   await mkdir(dirname(out), { recursive: true });
@@ -257,7 +262,7 @@ async function buildManifestFromEvents(
     github: githubRunContext(),
     configHash: hash,
     capture: {
-      adapter: "storybook-vitest-browser",
+      adapter: process.env.CHROMA_SNAP_ADAPTER ?? "storybook-vitest-browser",
       environment: {
         os: platform(),
         nodeVersion: process.version,

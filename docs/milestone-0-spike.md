@@ -55,3 +55,25 @@ chroma-snap capture --no-run
 - Whether concurrent browser workers isolate page state and artifact names as expected.
 
 If any of these fail in the spike, the capture engine should be revisited before building service features around this adapter.
+
+
+## Validation complete
+
+The real Storybook 10/Vite capture spike has been validated externally by the user. The chosen automatic capture hook is the Vitest browser-mode global setup hook: `beforeEach` applies mode context, and `afterEach` captures the final rendered story state after render/play completion.
+
+The detailed permanent evidence record is intentionally skipped for now; the implementation proceeds from the validated hook and keeps the adapter isolated while Milestone 1 hardening continues.
+
+## Next milestones
+
+### Milestone 1: hardened local capture and manifest
+
+- Apply named modes before capture where the browser API permits it.
+- Preserve screenshot timing breakdown and richer error metadata.
+- Add fixture/dogfood capture validation independent of a full Storybook dependency tree.
+- Keep manifest identity stable across story, mode, browser, viewport, globals, and config hash.
+
+### Milestone 2 and later
+
+- Add PostgreSQL migrations, S3-compatible object storage, durable queues, production OIDC verification, GitHub App checks, review approvals, audit events, and baseline promotion reconciliation.
+
+See [`review-workflow.md`](review-workflow.md) for the intended approval and promotion semantics.

@@ -13,7 +13,8 @@
     "build": "tsc -b",
     "clean": "npm run clean --workspaces --if-present",
     "typecheck": "tsc -b --pretty false",
-    "test": "npm run build && node --test tests/*.test.mjs"
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:fixture-capture": "npm run build && node examples/dogfood-capture.mjs"
   },
   "engines": {
     "node": ">=22.0.0"

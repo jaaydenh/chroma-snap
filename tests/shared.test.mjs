@@ -8,6 +8,7 @@ test("config normalization supplies deterministic v1 defaults", () => {
   assert.equal(config.modes[0].browser, "chromium");
   assert.equal(config.modes[0].viewport.width, 1280);
   assert.equal(config.capture.concurrency, 4);
+  assert.equal(config.capture.settleDelayMs, 0);
   assert.equal(config.thresholds.maxDiffPixels, 100);
 });
 
