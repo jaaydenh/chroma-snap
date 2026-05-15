@@ -48,4 +48,4 @@ This prevents unmerged PRs or stale approvals from changing the baseline seen by
 
 ## Local MVP behavior
 
-The current worker can seed base-branch baselines with `--seed-baselines`, classify PR-like manifests against those baselines, persist comparison reports, and use API-backed baseline/comparison stores for hosted worker handoff. Hosted approval storage, GitHub permissions, audit events, and promotion reconciliation are Milestone 5-6 work.
+The current worker can seed base-branch baselines with `--seed-baselines`, classify PR-like manifests against those baselines, persist comparison reports, and use API-backed baseline/comparison stores for hosted worker handoff. The API now records GitHub App webhooks, PR/base refs, and strict Check Run state locally, and can publish to GitHub Checks when a GitHub App publisher is configured. Hosted approval storage, GitHub reviewer permissions, audit events, and promotion reconciliation are Milestone 5-6 work.

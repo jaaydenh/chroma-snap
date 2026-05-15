@@ -2,6 +2,7 @@ export * from "./artifact-storage.js";
 export * from "./baseline-store.js";
 export * from "./comparison-store.js";
 export * from "./config.js";
+export * from "./github-app.js";
 export * from "./hash.js";
 export * from "./manifest.js";
 export * from "./retention.js";

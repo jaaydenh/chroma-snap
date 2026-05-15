@@ -93,7 +93,7 @@ test("API exposes baseline lookup and comparison record endpoints", async () => 
         buildId: "pr-build",
         sessionId: "session-1",
         repository: { fullName: "acme/widgets" },
-        git: { branch: "feature", baseBranch: "main" },
+        git: { commitSha: "pr-sha", branch: "feature", baseBranch: "main" },
         project: { name: "storybook" },
         status: "queued",
         createdAt: "2026-05-14T00:00:00.000Z",

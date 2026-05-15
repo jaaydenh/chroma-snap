@@ -14,6 +14,11 @@ repositories
   │    ├─ review_decisions
   │    └─ queue_jobs
   ├─ baselines
+  ├─ check_runs
+  ├─ github_installations
+  ├─ webhook_events
+  ├─ pull_request_metadata
+  ├─ github_refs
   └─ audit_events
 ```
 
@@ -26,6 +31,10 @@ repositories
 - **baselines**: canonical accepted snapshots per repository, project, branch, and snapshot identity.
 - **comparison_reports**: immutable summary for one build.
 - **snapshot_comparisons**: per-story/mode comparison results, including diff stats and approval requirements.
+- **check_runs**: strict GitHub Check state for one build, including queued/completed status and conclusion.
+- **github_installations**: GitHub App installation metadata and repository scope.
+- **webhook_events**: GitHub webhook delivery deduplication and processing audit records.
+- **pull_request_metadata** and **github_refs**: PR/base branch metadata captured from GitHub webhooks.
 - **review_decisions**: approval/rejection records created by authorized GitHub users.
 - **audit_events**: append-only operational and user-action audit trail.
 - **queue_jobs**: durable async work for diffing, check updates, cleanup, and baseline promotion.
@@ -52,11 +61,16 @@ The local API stores records under `.chroma-snap/server`:
   builds/{buildId}/build.json
   builds/{buildId}/manifest.json
   queue/{buildId}.json
+  github/webhooks/{deliveryId}.json
+  github/installations/{installationId}.json
+  github/pull-requests/{repository}/{number}.json
+  github/refs/{repository}/{ref}.json
+  github/check-runs/{buildId}.json
   baselines.json
   comparisons.json
 ```
 
-Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists.
+Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts.
 
 ## Deferred production work
 
