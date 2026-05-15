@@ -9,9 +9,12 @@ import {
   type BaselineRecord,
   type BaselineStore,
   type BuildManifest,
+  type AuditEvent,
   type ComparisonReport,
   type ComparisonStatus,
   type ComparisonStore,
+  type ReviewDecision,
+  type ReviewStore,
   type SnapshotComparison,
   type SnapshotManifestEntry,
 } from "@chroma-snap/shared";
@@ -23,6 +26,9 @@ export interface ProcessManifestOptions {
   baselineStore?: BaselineStore;
   comparisonStore?: ComparisonStore;
   artifactStore?: ArtifactStore;
+  reviewStore?: ReviewStore;
+  /** Reconcile approved PR visual decisions when a base-branch run confirms the same snapshot content. */
+  reconcileApprovedBaselines?: boolean;
   outputDir: string;
   seedBaselines?: boolean;
   now?: Date;
@@ -80,6 +86,13 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
           branch: baseBranch,
           imagePath: resolveImagePath(snapshot.image, manifestDir, options.artifactStore),
           buildId,
+          promotionContext: {
+            source: "seed",
+            status: "seeded",
+            promotedAt: now.toISOString(),
+            baseBranchConfirmedSha: manifest.git.commitSha,
+            note: "Seeded from an explicit base-branch seed run.",
+          },
           now,
         }),
       );
@@ -93,6 +106,21 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
         comparison.message = "Seeded as an accepted base-branch baseline.";
       }
     }
+  }
+
+  if (isBaseBranchRun && options.reconcileApprovedBaselines) {
+    const reconciliation = await reconcileApprovedBaselineChanges({
+      manifest,
+      comparisons,
+      baselineStore,
+      comparisonStore: options.comparisonStore,
+      reviewStore: options.reviewStore,
+      manifestDir,
+      now,
+      baseBranch,
+      artifactStore: options.artifactStore,
+    });
+    warnings.push(...reconciliation.warnings);
   }
 
   const summary = emptySummary();
@@ -229,6 +257,7 @@ function createBaselineRecord(input: {
   imagePath?: string;
   buildId: string;
   now: Date;
+  promotionContext?: BaselineRecord["promotionContext"];
 }): BaselineRecord {
   return {
     identityKey: input.snapshot.identityKey,
@@ -243,6 +272,225 @@ function createBaselineRecord(input: {
     projectName: input.manifest.project.name,
     story: input.snapshot.story,
     mode: input.snapshot.mode,
+    promotionContext: input.promotionContext,
+  };
+}
+
+interface ReconcileApprovedBaselineInput {
+  manifest: BuildManifest;
+  comparisons: SnapshotComparison[];
+  baselineStore: BaselineStore;
+  comparisonStore?: ComparisonStore;
+  reviewStore?: ReviewStore;
+  manifestDir: string;
+  now: Date;
+  baseBranch: string;
+  artifactStore?: ArtifactStore;
+}
+
+interface ApprovedComparisonCandidate {
+  decision: ReviewDecision;
+  report: ComparisonReport;
+  comparison: SnapshotComparison;
+  approvedSha256?: string;
+}
+
+async function reconcileApprovedBaselineChanges(input: ReconcileApprovedBaselineInput): Promise<{ warnings: string[] }> {
+  const warnings: string[] = [];
+  if (!input.reviewStore) {
+    warnings.push("Approved baseline reconciliation requested, but no review store is configured.");
+    return { warnings };
+  }
+  if (!input.comparisonStore?.listComparisonReports) {
+    warnings.push("Approved baseline reconciliation requested, but the comparison store cannot list prior reports.");
+    return { warnings };
+  }
+
+  const [reports, decisions] = await Promise.all([
+    input.comparisonStore.listComparisonReports(),
+    input.reviewStore.listReviewDecisions({}),
+  ]);
+  const approvedCandidates = approvedCandidatesByIdentity({ reports, decisions, baseBranch: input.baseBranch });
+  const baselinesToPromote: BaselineRecord[] = [];
+  const baselinesToRetire: SnapshotComparison[] = [];
+  const auditEvents: AuditEvent[] = [];
+
+  for (const comparison of input.comparisons) {
+    const candidates = approvedCandidates.get(comparison.identityKey) ?? [];
+    if (comparison.status === "deleted") {
+      const deletionCandidate = latestCandidate(candidates.filter((candidate) => candidate.comparison.status === "deleted"));
+      if (deletionCandidate) {
+        await input.baselineStore.deleteBaseline({
+          repositoryFullName: input.manifest.repository.fullName,
+          projectName: input.manifest.project.name,
+          branch: input.baseBranch,
+          identityKey: comparison.identityKey,
+        });
+        comparison.requiresApproval = false;
+        comparison.reviewDecision = deletionCandidate.decision;
+        comparison.message = `Retired baseline after approved deletion from ${deletionCandidate.report.headBranch} was confirmed on ${input.baseBranch}.`;
+        baselinesToRetire.push(comparison);
+        auditEvents.push(baselineAuditEvent({
+          eventType: "baseline.retired",
+          manifest: input.manifest,
+          comparison,
+          candidate: deletionCandidate,
+          now: input.now,
+          metadata: { baseBranch: input.baseBranch },
+        }));
+      }
+      continue;
+    }
+
+    if (comparison.current?.status !== "captured" || !comparison.current.image?.sha256 || !comparison.requiresApproval) {
+      continue;
+    }
+
+    const visualCandidates = candidates.filter((candidate) => candidate.comparison.status === "changed" || candidate.comparison.status === "new");
+    const matchingCandidate = latestCandidate(visualCandidates.filter((candidate) => candidate.approvedSha256 === comparison.current?.image?.sha256));
+    if (matchingCandidate) {
+      const baseline = createBaselineRecord({
+        manifest: input.manifest,
+        snapshot: comparison.current,
+        branch: input.baseBranch,
+        imagePath: resolveImagePath(comparison.current.image, input.manifestDir, input.artifactStore),
+        buildId: input.manifest.manifestId,
+        now: input.now,
+        promotionContext: {
+          source: "approved-pr",
+          status: "confirmed",
+          promotedAt: input.now.toISOString(),
+          promotedByDecisionId: matchingCandidate.decision.id,
+          approvedBuildId: matchingCandidate.report.buildId,
+          approvedHeadBranch: matchingCandidate.report.headBranch,
+          approvedSha256: matchingCandidate.approvedSha256,
+          baseBranchConfirmedSha: input.manifest.git.commitSha,
+          note: `Approved PR snapshot was confirmed by base-branch run ${input.manifest.manifestId}.`,
+        },
+      });
+      baselinesToPromote.push(baseline);
+      comparison.requiresApproval = false;
+      comparison.reviewDecision = matchingCandidate.decision;
+      comparison.message = `Promoted baseline after approved ${matchingCandidate.report.headBranch} snapshot was confirmed on ${input.baseBranch}.`;
+      auditEvents.push(baselineAuditEvent({
+        eventType: "baseline.promoted",
+        manifest: input.manifest,
+        comparison,
+        candidate: matchingCandidate,
+        now: input.now,
+        metadata: {
+          baseBranch: input.baseBranch,
+          approvedSha256: matchingCandidate.approvedSha256,
+          baseBranchConfirmedSha: input.manifest.git.commitSha,
+        },
+      }));
+      continue;
+    }
+
+    const mismatchedCandidate = latestCandidate(visualCandidates.filter((candidate) => Boolean(candidate.approvedSha256)));
+    if (mismatchedCandidate) {
+      const warning = `Approved baseline reconciliation for ${comparison.identityKey} did not promote: base-branch image ${comparison.current.image.sha256} does not match approved image ${mismatchedCandidate.approvedSha256}.`;
+      warnings.push(warning);
+      auditEvents.push(baselineAuditEvent({
+        eventType: "baseline.promotion_mismatch",
+        manifest: input.manifest,
+        comparison,
+        candidate: mismatchedCandidate,
+        now: input.now,
+        metadata: {
+          baseBranch: input.baseBranch,
+          approvedSha256: mismatchedCandidate.approvedSha256,
+          actualSha256: comparison.current.image.sha256,
+          warning,
+        },
+      }));
+    }
+  }
+
+  if (baselinesToPromote.length > 0) {
+    await input.baselineStore.promoteBaselines(baselinesToPromote);
+  }
+  for (const event of auditEvents) {
+    await input.reviewStore.saveAuditEvent(event);
+  }
+
+  if (baselinesToPromote.length > 0) {
+    warnings.push(`Promoted ${baselinesToPromote.length} approved baseline${baselinesToPromote.length === 1 ? "" : "s"} after base-branch confirmation.`);
+  }
+  if (baselinesToRetire.length > 0) {
+    warnings.push(`Retired ${baselinesToRetire.length} approved deleted baseline${baselinesToRetire.length === 1 ? "" : "s"} after base-branch confirmation.`);
+  }
+
+  return { warnings };
+}
+
+function approvedCandidatesByIdentity(input: {
+  reports: ComparisonReport[];
+  decisions: ReviewDecision[];
+  baseBranch: string;
+}): Map<string, ApprovedComparisonCandidate[]> {
+  const reportsByBuildId = new Map(input.reports.map((report) => [report.buildId, report]));
+  const latestByBuildAndIdentity = new Map<string, ReviewDecision>();
+  for (const decision of input.decisions) {
+    const key = `${decision.buildId}\0${decision.identityKey}`;
+    const existing = latestByBuildAndIdentity.get(key);
+    if (!existing || Date.parse(existing.createdAt) <= Date.parse(decision.createdAt)) {
+      latestByBuildAndIdentity.set(key, decision);
+    }
+  }
+
+  const byIdentity = new Map<string, ApprovedComparisonCandidate[]>();
+  for (const decision of latestByBuildAndIdentity.values()) {
+    if (decision.state !== "approved") {
+      continue;
+    }
+    const report = reportsByBuildId.get(decision.buildId);
+    if (!report || report.baseBranch !== input.baseBranch || report.headBranch === input.baseBranch) {
+      continue;
+    }
+    const comparison = report.comparisons.find((candidate) => candidate.identityKey === decision.identityKey);
+    if (!comparison) {
+      continue;
+    }
+    const candidates = byIdentity.get(decision.identityKey) ?? [];
+    candidates.push({ decision, report, comparison, approvedSha256: comparison.current?.image?.sha256 });
+    byIdentity.set(decision.identityKey, candidates);
+  }
+  return byIdentity;
+}
+
+function latestCandidate(candidates: ApprovedComparisonCandidate[]): ApprovedComparisonCandidate | undefined {
+  return candidates.sort((a, b) => Date.parse(a.decision.createdAt) - Date.parse(b.decision.createdAt)).at(-1);
+}
+
+function baselineAuditEvent(input: {
+  eventType: "baseline.promoted" | "baseline.retired" | "baseline.promotion_mismatch";
+  manifest: BuildManifest;
+  comparison: SnapshotComparison;
+  candidate: ApprovedComparisonCandidate;
+  now: Date;
+  metadata: Record<string, unknown>;
+}): AuditEvent {
+  return {
+    id: `${input.eventType}:${input.manifest.manifestId}:${input.comparison.identityKey}:${input.candidate.decision.id}`,
+    repositoryFullName: input.manifest.repository.fullName,
+    actor: { provider: "github", login: "chroma-snap-worker" },
+    eventType: input.eventType,
+    subjectType: "baseline",
+    subjectId: input.comparison.identityKey,
+    buildId: input.manifest.manifestId,
+    identityKey: input.comparison.identityKey,
+    metadata: {
+      ...input.metadata,
+      approvedBuildId: input.candidate.report.buildId,
+      approvedHeadBranch: input.candidate.report.headBranch,
+      decisionId: input.candidate.decision.id,
+      decisionCreatedAt: input.candidate.decision.createdAt,
+      reviewer: input.candidate.decision.user.login,
+      storyId: input.comparison.story?.id,
+      modeName: input.comparison.mode?.name,
+    },
+    createdAt: input.now.toISOString(),
   };
 }
 

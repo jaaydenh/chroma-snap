@@ -65,6 +65,7 @@ export interface BaselineRow {
   sha256: string;
   storyJson?: string;
   modeJson?: string;
+  promotionContextJson?: string;
   createdAt: string;
   promotedAt: string;
 }

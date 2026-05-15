@@ -17,6 +17,7 @@ import {
   strictCheckConclusionForReport,
   verifyArtifactSignature,
   type ArtifactStore,
+  type AuditEvent,
   type BaselineLookupInput,
   type BaselineRecord,
   type BaselineStore,
@@ -143,6 +144,40 @@ async function route(
       reports.map(async (report) => applyReviewDecisionsToReport(report, await options.reviewStore.listReviewDecisions({ buildId: report.buildId }))),
     );
     sendJson(res, 200, { reports: reviewedReports });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/review-decisions") {
+    const decisions = await options.reviewStore.listReviewDecisions({
+      buildId: url.searchParams.get("buildId") ?? undefined,
+      identityKey: url.searchParams.get("identityKey") ?? undefined,
+      state: reviewDecisionState(url.searchParams.get("state")),
+    });
+    sendJson(res, 200, { decisions });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/audit-events") {
+    const events = await options.reviewStore.listAuditEvents({
+      repositoryFullName: url.searchParams.get("repositoryFullName") ?? undefined,
+      buildId: url.searchParams.get("buildId") ?? undefined,
+      identityKey: url.searchParams.get("identityKey") ?? undefined,
+      eventType: url.searchParams.get("eventType") ?? undefined,
+      limit: parsePositiveInteger(url.searchParams.get("limit")),
+    });
+    sendJson(res, 200, { auditEvents: events });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/v1/audit-events") {
+    await assertUploadAuth(req, options);
+    const body = await readJson<{ event?: AuditEvent }>(req);
+    if (!body.event) {
+      throw new HttpError(400, "event is required.");
+    }
+    const event: AuditEvent = { ...body.event, id: randomUUID(), createdAt: new Date().toISOString() };
+    await options.reviewStore.saveAuditEvent(event);
+    sendJson(res, 201, { event });
     return;
   }
 
@@ -1084,6 +1119,10 @@ async function readJsonOrForm<T>(req: IncomingMessage): Promise<T> {
 
 function isFormRequest(req: IncomingMessage): boolean {
   return stringHeader(req.headers["content-type"])?.toLowerCase().startsWith("application/x-www-form-urlencoded") ?? false;
+}
+
+function reviewDecisionState(value: string | null): "approved" | "rejected" | undefined {
+  return value === "approved" || value === "rejected" ? value : undefined;
 }
 
 function parsePositiveInteger(value: string | null): number | undefined {
