@@ -1,3 +1,4 @@
+export * from "./artifact-signing.js";
 export * from "./artifact-storage.js";
 export * from "./baseline-store.js";
 export * from "./comparison-store.js";
@@ -6,5 +7,6 @@ export * from "./github-app.js";
 export * from "./hash.js";
 export * from "./manifest.js";
 export * from "./retention.js";
+export * from "./review-store.js";
 export * from "./review.js";
 export * from "./upload.js";

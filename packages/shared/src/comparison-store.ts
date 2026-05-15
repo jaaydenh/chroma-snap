@@ -4,9 +4,14 @@ import { dirname, resolve } from "node:path";
 import { withFileStoreLock } from "./file-store-lock.js";
 import type { ComparisonReport, SnapshotComparison } from "./review.js";
 
+export interface ComparisonReportListInput {
+  limit?: number;
+}
+
 export interface ComparisonStore {
   saveComparisonReport(report: ComparisonReport): Promise<void>;
   getComparisonReport(buildId: string): Promise<ComparisonReport | undefined>;
+  listComparisonReports?(input?: ComparisonReportListInput): Promise<ComparisonReport[]>;
 }
 
 export interface ComparisonStoreDocument {
@@ -28,6 +33,12 @@ export class FileComparisonStore implements ComparisonStore {
   async getComparisonReport(buildId: string): Promise<ComparisonReport | undefined> {
     const store = await this.readStore();
     return store.reports[buildId];
+  }
+
+  async listComparisonReports(input: ComparisonReportListInput = {}): Promise<ComparisonReport[]> {
+    const store = await this.readStore();
+    const reports = Object.values(store.reports).sort((a, b) => Date.parse(a.generatedAt) - Date.parse(b.generatedAt));
+    return input.limit === undefined ? reports : reports.slice(-Math.max(0, input.limit));
   }
 
   async listSnapshotComparisons(buildId: string): Promise<SnapshotComparison[]> {

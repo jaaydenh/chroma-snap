@@ -117,6 +117,9 @@ export function checkOutputForQueuedBuild(): GitHubCheckRunOutput {
 export function checkOutputForComparisonReport(report: ComparisonReport): GitHubCheckRunOutput {
   const conclusion = strictCheckConclusionForReport(report);
   const title = titleForConclusion(conclusion);
+  const approved = report.comparisons.filter((comparison) => comparison.reviewDecision?.state === "approved").length;
+  const rejected = report.comparisons.filter((comparison) => comparison.reviewDecision?.state === "rejected").length;
+  const awaitingReview = report.comparisons.filter((comparison) => comparison.requiresApproval).length;
   const summary = [
     `Compared ${report.comparisons.length} snapshots for ${report.headBranch} against ${report.baseBranch}.`,
     `Unchanged: ${report.summary.unchanged}`,
@@ -125,6 +128,9 @@ export function checkOutputForComparisonReport(report: ComparisonReport): GitHub
     `Deleted: ${report.summary.deleted}`,
     `Errored: ${report.summary.errored}`,
     `Pending: ${report.summary.pending}`,
+    `Approved: ${approved}`,
+    `Rejected: ${rejected}`,
+    `Awaiting review: ${awaitingReview}`,
     ...report.warnings.map((warning) => `Warning: ${warning}`),
   ].join("\n");
   return { title, summary };

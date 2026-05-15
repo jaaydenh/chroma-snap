@@ -7,9 +7,9 @@ This repository currently implements the first runnable slice of that plan:
 - Shared typed config, manifest, upload, baseline, diff, and review protocol models.
 - An experimental Storybook 10/Vite Vitest browser-mode capture adapter with an automatic `afterEach` screenshot hook.
 - A CLI that initializes config, runs capture commands, normalizes capture events into manifests, and uploads to an API.
-- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, queue records, baseline lookup, comparison report persistence, GitHub webhooks, and strict Checks records.
+- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, queue records, baseline lookup, comparison report persistence, GitHub webhooks, strict Checks records, review decisions, audit events, and signed artifact URLs.
 - A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, persists comparison reports, handles retry metadata, and seeds local baselines.
-- A simple hosted-review HTML renderer/server for comparison reports.
+- A hosted-review HTML renderer/server with a report list, image viewer, approval/rejection forms, decision state, and audit trail display.
 - A GitHub Action wrapper and example workflow.
 
 The code is open from day one, but production-grade self-hosting is not claimed yet. The local API uses file-backed storage plus development auth/storage seams so the core protocol can be exercised before PostgreSQL, S3, durable queues, and hosted deployment hardening are added.
@@ -97,18 +97,18 @@ The adapter remains experimental while Milestone 1 hardening continues. See [`do
 7. The GitHub Check remains strict: pending while processing or awaiting approval, success when clean or approved, failure for rejected/capture/error/invalid builds.
 8. Approved PR snapshots are promoted only after the approved commit lands on the base branch and a base-branch run confirms them.
 
-## GitHub App and Checks local seam
+## GitHub App, Checks, and review local seam
 
-Milestone 4 adds webhook ingestion and strict Check Run records. See [`docs/github-app.md`](docs/github-app.md) for the local endpoints, required webhook secret, and optional GitHub App environment variables for publishing Checks.
+Milestones 4 and 5 add webhook ingestion, strict Check Run records, review decisions, audit events, GitHub-permission gates, and signed artifact URLs. See [`docs/github-app.md`](docs/github-app.md) for the local endpoints, required webhook secret, optional GitHub App environment variables for publishing Checks, and review action auth notes.
 
 ## What is intentionally deferred
 
 - PostgreSQL connection/adapters and automated migration runner.
 - S3-compatible object storage implementation and lifecycle enforcement.
 - Durable queue integration beyond file-backed retry records.
-- GitHub permission checks for visual approvals.
+- Production OAuth session handling for the hosted review UI.
 - Production OIDC signature verification and required GitHub App installation verification on uploads.
-- Full React review UI with approvals, audit log, keyboard navigation, and signed artifact URLs.
+- Full React review UI with keyboard navigation, richer zoom/pan, and threaded review annotations.
 - Billing, SSO, SCIM, SOC2 exports, Helm, HA, and supported production self-hosting.
 
 ## License
