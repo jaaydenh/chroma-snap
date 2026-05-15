@@ -52,13 +52,16 @@ The local API stores records under `.chroma-snap/server`:
   builds/{buildId}/build.json
   builds/{buildId}/manifest.json
   queue/{buildId}.json
+  baselines.json
+  comparisons.json
 ```
 
-The worker's local baseline store is still a JSON file. The hosted implementation should move baseline, comparison, decision, usage, and audit metadata into PostgreSQL while continuing to keep binary artifacts in private object storage.
+Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists.
 
 ## Deferred production work
 
 - Apply migrations through a real migration runner.
 - Add a PostgreSQL adapter and connection pooling.
 - Add an S3-compatible `ArtifactStore` implementation.
-- Add retention cleanup, signed read URLs, GitHub permission checks, and audit-event writes.
+- Replace file-backed baseline/comparison stores and retry records with PostgreSQL adapters.
+- Add signed read URLs, GitHub permission checks, and audit-event writes.

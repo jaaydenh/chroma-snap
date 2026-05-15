@@ -203,6 +203,25 @@ test("API finalization rejects missing or mismatched artifact uploads", async ()
   });
 });
 
+test("API finalization rejects snapshot object keys outside the upload session", async () => {
+  await withApi(async ({ url }) => {
+    const bytes = pngBytes();
+    const session = await createSession(url, sessionRequest(bytes));
+    const target = session.uploadTargets[0];
+    assert.equal((await fetch(target.url, { method: "PUT", headers: target.headers, body: bytes })).status, 200);
+    const manifest = manifestFor({ session, target, bytes });
+    manifest.snapshots[0].image.objectKey = "artifacts/github/acme/widgets/abc123/other-session/button.png";
+
+    const response = await fetch(`${url}/v1/upload-sessions/${session.sessionId}/finalize`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ manifest }),
+    });
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /not part of this upload session/i);
+  });
+});
+
 test("API finalization rejects repository and commit spoofing", async () => {
   await withApi(async ({ url }) => {
     const bytes = pngBytes();

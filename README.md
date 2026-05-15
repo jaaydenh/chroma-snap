@@ -7,8 +7,8 @@ This repository currently implements the first runnable slice of that plan:
 - Shared typed config, manifest, upload, baseline, diff, and review protocol models.
 - An experimental Storybook 10/Vite Vitest browser-mode capture adapter with an automatic `afterEach` screenshot hook.
 - A CLI that initializes config, runs capture commands, normalizes capture events into manifests, and uploads to an API.
-- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, and queue records.
-- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, and seeds local baselines.
+- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, queue records, baseline lookup, and comparison report persistence.
+- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, persists comparison reports, handles retry metadata, and seeds local baselines.
 - A simple hosted-review HTML renderer/server for comparison reports.
 - A GitHub Action wrapper and example workflow.
 
@@ -99,9 +99,9 @@ The adapter remains experimental while Milestone 1 hardening continues. See [`do
 
 ## What is intentionally deferred
 
-- Production PostgreSQL schema and migrations.
-- S3-compatible object storage implementation and lifecycle policies.
-- Durable queue integration.
+- PostgreSQL connection/adapters and automated migration runner.
+- S3-compatible object storage implementation and lifecycle enforcement.
+- Durable queue integration beyond file-backed retry records.
 - GitHub App installation flow, webhooks, permission checks, and Checks API updates.
 - Production OIDC signature verification and GitHub App installation verification.
 - Full React review UI with approvals, audit log, keyboard navigation, and signed artifact URLs.

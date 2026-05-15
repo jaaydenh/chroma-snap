@@ -1,3 +1,5 @@
+export * from "./queue-processor.js";
+export * from "./api-stores.js";
 export * from "./diff.js";
 export * from "./processor.js";
 

@@ -24,6 +24,13 @@ export interface BaselineReference {
   promotedAt: string;
 }
 
+export interface BaselineRecord extends BaselineReference {
+  repositoryFullName: string;
+  projectName: string;
+  story: SnapshotManifestEntry["story"];
+  mode: SnapshotManifestEntry["mode"];
+}
+
 export interface SnapshotComparison {
   identityKey: string;
   status: ComparisonStatus;

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PNG } from "pngjs";
 import { diffPngFiles, processManifest } from "../apps/worker/dist/index.js";
-import { MANIFEST_SCHEMA_VERSION, sha256File, snapshotIdentityKey } from "../packages/shared/dist/index.js";
+import { FileComparisonStore, MANIFEST_SCHEMA_VERSION, sha256File, snapshotIdentityKey } from "../packages/shared/dist/index.js";
 
 async function writeSolidPng(path, rgba) {
   const png = new PNG({ width: 2, height: 2 });
@@ -88,14 +88,17 @@ test("processor seeds base baselines and classifies PR diffs", async () => {
   assert.equal(seedReport.checkConclusion, "success");
   assert.equal(seedReport.summary.new, 1);
 
+  const comparisonStore = new FileComparisonStore(join(dir, "comparisons.json"));
   const prReport = await processManifest(manifest({ branch: "feature", baseBranch: "main", pr: 12, imagePath: currentImage, sha: await sha256File(currentImage), identityKey, id: "pr" }), {
     baselineFile,
     outputDir,
+    comparisonStore,
     now: new Date("2026-05-13T00:01:00.000Z"),
   });
   assert.equal(prReport.checkConclusion, "action_required");
   assert.equal(prReport.summary.changed, 1);
   assert.equal(prReport.comparisons[0].diff.stats.diffPixels, 4);
+  assert.equal((await comparisonStore.getComparisonReport("pr")).summary.changed, 1);
 });
 
 test("processor includes capture error stack, timeout, and logs in failure messages", async () => {

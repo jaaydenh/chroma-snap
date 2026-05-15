@@ -5,7 +5,14 @@ import { dirname, resolve } from "node:path";
 import {
   assertValidManifest,
   FileArtifactStore,
+  FileBaselineStore,
+  FileComparisonStore,
   type ArtifactStore,
+  type BaselineLookupInput,
+  type BaselineRecord,
+  type BaselineStore,
+  type ComparisonReport,
+  type ComparisonStore,
   type CreateUploadSessionRequest,
   type FinalizeUploadSessionRequest,
   type FinalizeUploadSessionResponse,
@@ -23,7 +30,23 @@ export interface ApiServerOptions {
   /** Development-only escape hatch for local CLI tests without GitHub OIDC. */
   allowDevAuth?: boolean;
   artifactStore?: ArtifactStore;
+  baselineStore?: BaselineStore;
+  comparisonStore?: ComparisonStore;
   oidcAudience?: string;
+}
+
+interface StoredBuildRecord {
+  buildId: string;
+  sessionId: string;
+  repository: { fullName: string };
+  git: { branch: string; baseBranch?: string };
+  project: { name: string };
+  status: "queued" | "processing" | "completed" | "failed";
+  createdAt: string;
+  finalizedAt?: string;
+  comparedAt?: string;
+  checkConclusion?: ComparisonReport["checkConclusion"];
+  summary?: ComparisonReport["summary"];
 }
 
 export async function startApiServer(options: ApiServerOptions = {}): Promise<{ server: Server; url: string }> {
@@ -31,12 +54,14 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
   const port = options.port ?? 4007;
   const storageDir = resolve(options.storageDir ?? ".chroma-snap/server");
   const artifactStore = options.artifactStore ?? new FileArtifactStore(storageDir);
+  const baselineStore = options.baselineStore ?? new FileBaselineStore(resolve(storageDir, "baselines.json"));
+  const comparisonStore = options.comparisonStore ?? new FileComparisonStore(resolve(storageDir, "comparisons.json"));
   let publicUrl = options.publicUrl ?? `http://${host}:${port}`;
   await mkdir(storageDir, { recursive: true });
 
   const server = createServer(async (req, res) => {
     try {
-      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore });
+      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore, baselineStore, comparisonStore });
     } catch (error) {
       sendJson(res, error instanceof HttpError ? error.status : 500, {
         error: error instanceof Error ? error.message : String(error),
@@ -54,7 +79,7 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
-  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore">> & ApiServerOptions,
+  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore" | "baselineStore" | "comparisonStore">> & ApiServerOptions,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", options.publicUrl);
 
@@ -85,6 +110,75 @@ async function route(
     const body = await readJson<FinalizeUploadSessionRequest>(req);
     const response = await finalizeUploadSession(finalizeMatch[1]!, body, options);
     sendJson(res, 202, response);
+    return;
+  }
+
+  const baselineMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/baselines$/);
+  if (req.method === "GET" && baselineMatch) {
+    const build = await readJsonFile<StoredBuildRecord>(resolve(options.storageDir, "builds", baselineMatch[1]!, "build.json"));
+    const branch = url.searchParams.get("branch") ?? build.git.baseBranch ?? build.git.branch;
+    const identityKey = url.searchParams.get("identityKey") ?? undefined;
+    if (identityKey) {
+      const baseline = await options.baselineStore.lookupBaseline({
+        repositoryFullName: build.repository.fullName,
+        projectName: build.project.name,
+        branch,
+        identityKey,
+      });
+      if (!baseline) {
+        throw new HttpError(404, "Baseline not found.");
+      }
+      sendJson(res, 200, { baseline });
+      return;
+    }
+
+    const baselines = await options.baselineStore.listBaselinesForBranch({
+      repositoryFullName: build.repository.fullName,
+      projectName: build.project.name,
+      branch,
+    });
+    sendJson(res, 200, { baselines });
+    return;
+  }
+
+  if (req.method === "PUT" && url.pathname === "/v1/baselines") {
+    const body = await readJson<{ baseline?: BaselineRecord }>(req);
+    if (!body.baseline) {
+      throw new HttpError(400, "baseline is required.");
+    }
+    await options.baselineStore.promoteBaseline(body.baseline);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/v1/baselines") {
+    const body = await readJson<BaselineLookupInput>(req);
+    await options.baselineStore.deleteBaseline(body);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  const comparisonMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/comparison-report$/);
+  if (comparisonMatch && (req.method === "PUT" || req.method === "POST")) {
+    const body = await readJson<{ report?: ComparisonReport }>(req);
+    if (!body.report) {
+      throw new HttpError(400, "report is required.");
+    }
+    if (body.report.buildId !== comparisonMatch[1]) {
+      throw new HttpError(400, "Comparison report buildId does not match URL.");
+    }
+    await options.comparisonStore.saveComparisonReport(body.report);
+    await markBuildCompared(options.storageDir, body.report);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (comparisonMatch && req.method === "GET") {
+    const report = await options.comparisonStore.getComparisonReport(comparisonMatch[1]!);
+    if (!report) {
+      throw new HttpError(404, "Comparison report not found.");
+    }
+    sendJson(res, 200, { report });
     return;
   }
 
@@ -196,16 +290,31 @@ async function finalizeUploadSession(
     finalizedAt: new Date().toISOString(),
   });
   await writeJsonFile(resolve(options.storageDir, "queue", `${session.buildId}.json`), {
+    id: session.buildId,
     type: "diff-build",
     buildId: session.buildId,
-    manifestPath: resolve(buildDir, "manifest.json"),
-    enqueuedAt: new Date().toISOString(),
+    payloadJson: JSON.stringify({ manifestPath: resolve(buildDir, "manifest.json") }),
+    status: "pending",
+    attempts: 0,
+    createdAt: new Date().toISOString(),
   });
 
   session.finalized = true;
   await writeJsonFile(sessionPath(options.storageDir, sessionId), session);
 
   return { buildId: session.buildId, status: "queued", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}` };
+}
+
+async function markBuildCompared(storageDir: string, report: ComparisonReport): Promise<void> {
+  const buildPath = resolve(storageDir, "builds", report.buildId, "build.json");
+  const build = await readJsonFile<StoredBuildRecord>(buildPath);
+  await writeJsonFile(buildPath, {
+    ...build,
+    status: report.checkConclusion === "failure" ? "failed" : "completed",
+    comparedAt: report.generatedAt,
+    checkConclusion: report.checkConclusion,
+    summary: report.summary,
+  });
 }
 
 async function assertUploadAuth(req: IncomingMessage, options: ApiServerOptions): Promise<void> {

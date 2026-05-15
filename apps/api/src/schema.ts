@@ -63,6 +63,8 @@ export interface BaselineRow {
   buildId: string;
   objectKey?: string;
   sha256: string;
+  storyJson?: string;
+  modeJson?: string;
   createdAt: string;
   promotedAt: string;
 }
@@ -75,6 +77,7 @@ export interface ComparisonReportRow {
   headBranch: string;
   checkConclusion: "success" | "failure" | "action_required" | "neutral";
   summaryJson: string;
+  warningsJson: string;
   createdAt: string;
 }
 
@@ -113,6 +116,16 @@ export interface AuditEventRow {
   createdAt: string;
 }
 
+export interface RetentionPolicyRow {
+  id: string;
+  repositoryId: string;
+  buildArtifactRetentionDays: number;
+  comparisonRetentionDays: number;
+  queueJobRetentionDays: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface QueueJobRow {
   id: string;
   type: "diff-build" | "check-update" | "cleanup" | "baseline-promotion" | string;
@@ -123,4 +136,5 @@ export interface QueueJobRow {
   createdAt: string;
   processedAt?: string;
   lastError?: string;
+  nextRetryAt?: string;
 }
