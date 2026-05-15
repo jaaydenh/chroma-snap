@@ -55,6 +55,9 @@ CHROMA_SNAP_GITHUB_APP_ID=12345
 CHROMA_SNAP_GITHUB_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----\n..."
 CHROMA_SNAP_ARTIFACT_SIGNING_SECRET=...
 CHROMA_SNAP_GITHUB_CHECK_NAME="Chroma Snap Visual Tests"
+CHROMA_SNAP_ADMIN_SECRET="operator-cleanup-secret"
+CHROMA_SNAP_METRICS_STDOUT=1
+CHROMA_SNAP_REQUEST_LOGS=1
 ```
 
-Production deployments still need the later-milestone hardening called out in the README: PostgreSQL adapters, durable queues, required installation checks during upload authentication, and full OAuth session handling for the hosted review UI.
+Milestone 7 adds `/health`, `/ready`, `/v1/admin/diagnostics`, and `/v1/admin/cleanup` for private-beta operations. Production deployments still need the later hardening called out in the README: PostgreSQL adapters, durable queues, required installation checks during upload authentication, and full OAuth session handling for the hosted review UI.

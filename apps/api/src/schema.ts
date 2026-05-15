@@ -198,6 +198,41 @@ export interface RetentionPolicyRow {
   updatedAt: string;
 }
 
+export interface UsageEventRow {
+  id: string;
+  repositoryId?: string;
+  buildId?: string;
+  metricName: string;
+  metricValue: number;
+  metricUnit: "count" | "bytes" | "milliseconds";
+  labelsJson: string;
+  emittedAt: string;
+}
+
+export interface PrivateBetaLimitRow {
+  id: string;
+  repositoryFullName?: string;
+  maxArtifactsPerUploadSession?: number;
+  maxArtifactBytesPerUploadSession?: number;
+  maxSnapshotsPerBuild?: number;
+  maxSnapshotBytesPerBuild?: number;
+  maxErroredSnapshotsPerBuild?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CleanupRunRow {
+  id: string;
+  kind: "artifact" | "comparison" | "queue-job" | string;
+  dryRun: boolean;
+  scannedCount: number;
+  deletedCount: number;
+  freedBytes: number;
+  warningsJson: string;
+  startedAt: string;
+  completedAt?: string;
+}
+
 export interface QueueJobRow {
   id: string;
   type: "diff-build" | "check-update" | "cleanup" | "baseline-promotion" | string;

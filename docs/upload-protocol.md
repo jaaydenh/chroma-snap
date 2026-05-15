@@ -38,6 +38,12 @@ The worker compares captured snapshots to canonical accepted base-branch baselin
 - `errored`: capture or manifest integrity failed.
 - `pending`: reserved for async hosted processing.
 
+## Private-beta guardrails
+
+Milestone 7 applies private-beta limits during session creation and finalization. Upload-session creation can reject oversized artifact declarations before any bytes are uploaded. Finalization can reject manifests with too many snapshots, too many errored snapshots, or too many referenced snapshot bytes before diff jobs are queued. These failures return HTTP 429 with code `QUOTA_EXCEEDED`.
+
+Cleanup for abandoned, unfinalized sessions is available through `POST /v1/admin/cleanup?kind=artifact`. Finalized build artifacts remain protected by default so baseline images are not deleted by the local cleanup path.
+
 ## Security note
 
 `apps/api` parses and validates stable GitHub Actions OIDC claims, but it does not implement JWKS signature verification yet. Local development must use `CHROMA_SNAP_DEV_AUTH=1` or explicitly opt into unsigned claim testing. Production must add signature verification and GitHub App installation checks before accepting private screenshots.

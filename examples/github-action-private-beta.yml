@@ -1,0 +1,50 @@
+name: Chroma Snap private-beta visual gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+  checks: write
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build-storybook
+
+      - name: Capture and upload Chroma Snap snapshots
+        uses: ./packages/action
+        with:
+          service-url: https://snap.example.com
+          config-path: visual.config.ts
+        env:
+          # The hosted service verifies the GitHub Actions OIDC token before accepting uploads.
+          CHROMA_SNAP_OIDC_AUDIENCE: chroma-snap
+
+  operator-cleanup-example:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger dry-run cleanup for old terminal queue jobs
+        run: |
+          curl -fsS -X POST \
+            -H "x-chroma-snap-admin-secret: $CHROMA_SNAP_ADMIN_SECRET" \
+            "https://snap.example.com/v1/admin/cleanup?kind=queue-job&dryRun=true&limit=100"
+        env:
+          CHROMA_SNAP_ADMIN_SECRET: ${{ secrets.CHROMA_SNAP_ADMIN_SECRET }}
