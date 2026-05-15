@@ -3,32 +3,26 @@ import { basename, dirname, resolve } from "node:path";
 import {
   assertValidManifest,
   emptySummary,
-  hashObject,
+  FileBaselineStore,
   sha256File,
-  type BaselineReference,
+  type ArtifactStore,
+  type BaselineRecord,
+  type BaselineStore,
   type BuildManifest,
   type ComparisonReport,
   type ComparisonStatus,
+  type ComparisonStore,
   type SnapshotComparison,
   type SnapshotManifestEntry,
 } from "@chroma-snap/shared";
 import { diffPngFiles } from "./diff.js";
 
-interface StoredBaselineRecord extends BaselineReference {
-  repositoryFullName: string;
-  projectName: string;
-  story: SnapshotManifestEntry["story"];
-  mode: SnapshotManifestEntry["mode"];
-}
-
-interface BaselineStore {
-  version: 1;
-  records: Record<string, StoredBaselineRecord>;
-}
-
 export interface ProcessManifestOptions {
   manifestPath?: string;
-  baselineFile: string;
+  baselineFile?: string;
+  baselineStore?: BaselineStore;
+  comparisonStore?: ComparisonStore;
+  artifactStore?: ArtifactStore;
   outputDir: string;
   seedBaselines?: boolean;
   now?: Date;
@@ -41,27 +35,29 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
   const baseBranch = manifest.git.baseBranch ?? manifest.git.branch;
   const isBaseBranchRun = manifest.git.branch === baseBranch && manifest.git.pullRequestNumber === undefined;
   const manifestDir = options.manifestPath ? dirname(resolve(options.manifestPath)) : process.cwd();
-  const baselines = await readBaselineStore(options.baselineFile);
+  const baselineStore = getBaselineStore(options);
   const currentIdentityKeys = new Set(manifest.snapshots.map((snapshot) => snapshot.identityKey));
   const comparisons: SnapshotComparison[] = [];
   const warnings: string[] = [];
+  const branchBaselineInput = {
+    repositoryFullName: manifest.repository.fullName,
+    projectName: manifest.project.name,
+    branch: baseBranch,
+  };
+  const branchBaselines = await baselineStore.listBaselinesForBranch(branchBaselineInput);
+  const baselinesByIdentityKey = new Map(branchBaselines.map((baseline) => [baseline.identityKey, baseline]));
 
   if (!options.seedBaselines && isBaseBranchRun) {
     warnings.push("Base-branch run processed without baseline promotion. Use seedBaselines for initial seeding or approved promotion reconciliation.");
   }
 
   for (const snapshot of manifest.snapshots) {
-    const baseline = baselines.records[baselineKey(manifest, baseBranch, snapshot.identityKey)];
-    comparisons.push(await compareSnapshot(snapshot, baseline, manifest, manifestDir, options.outputDir));
+    const baseline = baselinesByIdentityKey.get(snapshot.identityKey);
+    comparisons.push(await compareSnapshot(snapshot, baseline, manifest, manifestDir, options.outputDir, options.artifactStore));
   }
 
-  for (const baseline of Object.values(baselines.records)) {
-    if (
-      baseline.repositoryFullName === manifest.repository.fullName &&
-      baseline.projectName === manifest.project.name &&
-      baseline.branch === baseBranch &&
-      !currentIdentityKeys.has(baseline.identityKey)
-    ) {
+  for (const baseline of branchBaselines) {
+    if (!currentIdentityKeys.has(baseline.identityKey)) {
       comparisons.push({
         identityKey: baseline.identityKey,
         status: "deleted",
@@ -75,27 +71,19 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
   }
 
   if (isBaseBranchRun && options.seedBaselines) {
-    for (const snapshot of manifest.snapshots) {
-      if (snapshot.status !== "captured" || !snapshot.image?.sha256) {
-        continue;
-      }
-      const imagePath = resolveImagePath(snapshot.image.path, manifestDir);
-      baselines.records[baselineKey(manifest, baseBranch, snapshot.identityKey)] = {
-        identityKey: snapshot.identityKey,
-        branch: baseBranch,
-        buildId,
-        imagePath,
-        objectKey: snapshot.image.objectKey,
-        sha256: snapshot.image.sha256,
-        createdAt: now.toISOString(),
-        promotedAt: now.toISOString(),
-        repositoryFullName: manifest.repository.fullName,
-        projectName: manifest.project.name,
-        story: snapshot.story,
-        mode: snapshot.mode,
-      };
-    }
-    await writeBaselineStore(options.baselineFile, baselines);
+    const recordsToPromote = manifest.snapshots
+      .filter((snapshot) => snapshot.status === "captured" && Boolean(snapshot.image?.sha256))
+      .map((snapshot) =>
+        createBaselineRecord({
+          manifest,
+          snapshot,
+          branch: baseBranch,
+          imagePath: resolveImagePath(snapshot.image, manifestDir, options.artifactStore),
+          buildId,
+          now,
+        }),
+      );
+    await baselineStore.promoteBaselines(recordsToPromote);
   }
 
   if (isBaseBranchRun && options.seedBaselines) {
@@ -125,6 +113,7 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
 
   await mkdir(options.outputDir, { recursive: true });
   await writeFile(resolve(options.outputDir, "comparison-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+  await options.comparisonStore?.saveComparisonReport(report);
   return report;
 }
 
@@ -135,10 +124,11 @@ export async function processManifestFile(path: string, options: Omit<ProcessMan
 
 async function compareSnapshot(
   snapshot: SnapshotManifestEntry,
-  baseline: StoredBaselineRecord | undefined,
+  baseline: BaselineRecord | undefined,
   manifest: BuildManifest,
   manifestDir: string,
   outputDir: string,
+  artifactStore?: ArtifactStore,
 ): Promise<SnapshotComparison> {
   if (snapshot.status === "errored") {
     return {
@@ -190,8 +180,8 @@ async function compareSnapshot(
     };
   }
 
-  const currentPath = resolveImagePath(snapshot.image.path, manifestDir);
-  const baselinePath = baseline.imagePath;
+  const currentPath = resolveImagePath(snapshot.image, manifestDir, artifactStore);
+  const baselinePath = resolveBaselinePath(baseline, artifactStore);
   if (!currentPath || !baselinePath) {
     return {
       identityKey: snapshot.identityKey,
@@ -232,6 +222,30 @@ async function compareSnapshot(
   };
 }
 
+function createBaselineRecord(input: {
+  manifest: BuildManifest;
+  snapshot: SnapshotManifestEntry;
+  branch: string;
+  imagePath?: string;
+  buildId: string;
+  now: Date;
+}): BaselineRecord {
+  return {
+    identityKey: input.snapshot.identityKey,
+    branch: input.branch,
+    buildId: input.buildId,
+    imagePath: input.imagePath,
+    objectKey: input.snapshot.image?.objectKey,
+    sha256: input.snapshot.image?.sha256 ?? "",
+    createdAt: input.now.toISOString(),
+    promotedAt: input.now.toISOString(),
+    repositoryFullName: input.manifest.repository.fullName,
+    projectName: input.manifest.project.name,
+    story: input.snapshot.story,
+    mode: input.snapshot.mode,
+  };
+}
+
 function determineConclusion(comparisons: SnapshotComparison[]): ComparisonReport["checkConclusion"] {
   if (comparisons.some((comparison) => comparison.status === "errored")) {
     return "failure";
@@ -242,24 +256,11 @@ function determineConclusion(comparisons: SnapshotComparison[]): ComparisonRepor
   return "success";
 }
 
-function baselineKey(manifest: BuildManifest, branch: string, identityKey: string): string {
-  return hashObject({ repositoryFullName: manifest.repository.fullName, projectName: manifest.project.name, branch, identityKey });
-}
-
-async function readBaselineStore(path: string): Promise<BaselineStore> {
-  try {
-    return JSON.parse(await readFile(path, "utf8")) as BaselineStore;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      return { version: 1, records: {} };
-    }
-    throw error;
+function getBaselineStore(options: ProcessManifestOptions): BaselineStore {
+  if (options.baselineStore) {
+    return options.baselineStore;
   }
-}
-
-async function writeBaselineStore(path: string, store: BaselineStore): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+  return new FileBaselineStore(resolve(options.baselineFile ?? ".chroma-snap/baselines.json"));
 }
 
 export function formatCaptureErrorMessage(snapshot: SnapshotManifestEntry): string {
@@ -288,9 +289,22 @@ export function formatCaptureErrorMessage(snapshot: SnapshotManifestEntry): stri
   return parts.join("\n\n");
 }
 
-function resolveImagePath(path: string | undefined, manifestDir: string): string | undefined {
-  if (!path) {
-    return undefined;
+function resolveImagePath(image: SnapshotManifestEntry["image"], manifestDir: string, artifactStore?: ArtifactStore): string | undefined {
+  if (image?.path) {
+    return resolve(manifestDir, image.path);
   }
-  return resolve(manifestDir, path);
+  if (image?.objectKey && artifactStore?.localPath) {
+    return artifactStore.localPath(image.objectKey);
+  }
+  return undefined;
+}
+
+function resolveBaselinePath(baseline: BaselineRecord, artifactStore?: ArtifactStore): string | undefined {
+  if (baseline.imagePath) {
+    return baseline.imagePath;
+  }
+  if (baseline.objectKey && artifactStore?.localPath) {
+    return artifactStore.localPath(baseline.objectKey);
+  }
+  return undefined;
 }

@@ -25,7 +25,7 @@ The local API stores files under `.chroma-snap/server/artifacts`. The production
 
 `POST /v1/upload-sessions/:sessionId/finalize`
 
-The CLI sends the normalized manifest. Finalization validates the manifest, writes build metadata, and enqueues a diff job record.
+The CLI sends the normalized manifest. Finalization validates the manifest, writes build metadata, creates a queued Chroma Snap GitHub Check record, and enqueues a diff job record.
 
 ## 4. Diff processing
 

@@ -9,7 +9,6 @@ export interface UploadIntegrityResult {
 export async function verifyUploadIntegrity(session: StoredSession, manifest: BuildManifest, store: ArtifactStore): Promise<UploadIntegrityResult> {
   const errors: string[] = [];
   const statusesByObjectKey = new Map(session.artifacts.map((artifact) => [artifact.objectKey, artifact]));
-  const statusesById = new Map(session.artifacts.map((artifact) => [artifact.id, artifact]));
 
   for (const artifact of session.artifacts) {
     const verification = await store.verifyArtifact(artifact.objectKey, { sha256: artifact.sha256, byteSize: artifact.byteSize });
@@ -41,7 +40,7 @@ export async function verifyUploadIntegrity(session: StoredSession, manifest: Bu
       continue;
     }
 
-    const sessionArtifact = statusesByObjectKey.get(snapshot.image.objectKey) ?? statusesById.get(`${snapshot.identityKey}.png`);
+    const sessionArtifact = statusesByObjectKey.get(snapshot.image.objectKey);
     if (!sessionArtifact) {
       errors.push(`Snapshot '${snapshot.story.id}' references objectKey '${snapshot.image.objectKey}' that is not part of this upload session.`);
       continue;

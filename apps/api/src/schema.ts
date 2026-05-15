@@ -63,6 +63,8 @@ export interface BaselineRow {
   buildId: string;
   objectKey?: string;
   sha256: string;
+  storyJson?: string;
+  modeJson?: string;
   createdAt: string;
   promotedAt: string;
 }
@@ -75,6 +77,7 @@ export interface ComparisonReportRow {
   headBranch: string;
   checkConclusion: "success" | "failure" | "action_required" | "neutral";
   summaryJson: string;
+  warningsJson: string;
   createdAt: string;
 }
 
@@ -113,6 +116,87 @@ export interface AuditEventRow {
   createdAt: string;
 }
 
+export interface GitHubInstallationRow {
+  id: string;
+  appId?: number;
+  installationId: number;
+  accountLogin?: string;
+  permissionsJson: string;
+  repositoriesJson: string;
+  suspendedAt?: string;
+  deletedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface WebhookEventRow {
+  id: string;
+  githubDeliveryId: string;
+  eventType: string;
+  action?: string;
+  repositoryFullName?: string;
+  installationId?: number;
+  payloadJson: string;
+  processed: boolean;
+  receivedAt: string;
+  processedAt?: string;
+}
+
+export interface PullRequestMetadataRow {
+  id: string;
+  repositoryFullName: string;
+  pullRequestNumber: number;
+  action: string;
+  title?: string;
+  state?: string;
+  merged?: boolean;
+  headRef: string;
+  headSha: string;
+  baseRef: string;
+  baseSha?: string;
+  mergeCommitSha?: string;
+  senderLogin?: string;
+  installationId?: number;
+  updatedAt: string;
+}
+
+export interface GitHubRefRow {
+  id: string;
+  repositoryFullName: string;
+  ref: string;
+  sha: string;
+  beforeSha?: string;
+  pusher?: string;
+  installationId?: number;
+  updatedAt: string;
+}
+
+export interface CheckRunRow {
+  id: string;
+  buildId: string;
+  repositoryFullName: string;
+  headSha: string;
+  installationId?: number;
+  githubCheckRunId?: number;
+  name: string;
+  status: "queued" | "in_progress" | "completed";
+  conclusion?: "success" | "failure" | "action_required" | "neutral";
+  detailsUrl?: string;
+  outputJson: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RetentionPolicyRow {
+  id: string;
+  repositoryId: string;
+  buildArtifactRetentionDays: number;
+  comparisonRetentionDays: number;
+  queueJobRetentionDays: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface QueueJobRow {
   id: string;
   type: "diff-build" | "check-update" | "cleanup" | "baseline-promotion" | string;
@@ -123,4 +207,5 @@ export interface QueueJobRow {
   createdAt: string;
   processedAt?: string;
   lastError?: string;
+  nextRetryAt?: string;
 }
