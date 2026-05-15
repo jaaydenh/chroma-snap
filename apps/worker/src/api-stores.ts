@@ -4,6 +4,7 @@ import type {
   BaselineRecord,
   BaselineStore,
   ComparisonReport,
+  ComparisonReportListInput,
   ComparisonStore,
   AuditEvent,
   AuditEventListInput,
@@ -111,8 +112,13 @@ export class ApiComparisonStore implements ComparisonStore {
     return body.report;
   }
 
-  async listComparisonReports(): Promise<ComparisonReport[]> {
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/reports`, {
+  async listComparisonReports(input: ComparisonReportListInput = {}): Promise<ComparisonReport[]> {
+    const params = new URLSearchParams();
+    if (input.limit !== undefined) {
+      params.set("limit", String(input.limit));
+    }
+    const query = params.size ? `?${params}` : "";
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/reports${query}`, {
       headers: await requestHeaders(this.headers),
     });
     if (!response.ok) {

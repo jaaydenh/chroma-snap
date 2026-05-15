@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PNG } from "pngjs";
-import { processManifest } from "../apps/worker/dist/index.js";
+import { startApiServer } from "../apps/api/dist/index.js";
+import { ApiComparisonStore, processManifest } from "../apps/worker/dist/index.js";
 import {
   FileBaselineStore,
   FileComparisonStore,
@@ -13,6 +14,17 @@ import {
   sha256File,
   snapshotIdentityKey,
 } from "../packages/shared/dist/index.js";
+
+async function withApi(fn) {
+  const storageDir = await mkdtemp(join(tmpdir(), "chroma-snap-m6-api-"));
+  const { server, url } = await startApiServer({ allowDevAuth: true, host: "127.0.0.1", port: 0, storageDir });
+  try {
+    await fn({ storageDir, url });
+  } finally {
+    await new Promise((resolveClose, reject) => server.close((error) => (error ? reject(error) : resolveClose())));
+    await rm(storageDir, { recursive: true, force: true });
+  }
+}
 
 async function writeSolidPng(path, rgba) {
   const png = new PNG({ width: 2, height: 2 });
@@ -87,6 +99,51 @@ async function setupStores(dir) {
     reviewStore: new FileReviewStore(join(dir, "reviews.json")),
   };
 }
+
+test("API audit endpoint generates immutable IDs and timestamps server-side", async () => {
+  await withApi(async ({ url }) => {
+    const response = await fetch(`${url}/v1/audit-events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        event: {
+          id: "client-controlled-id",
+          repositoryFullName: "acme/widgets",
+          actor: { provider: "github", login: "worker" },
+          eventType: "baseline.promoted",
+          subjectType: "baseline",
+          subjectId: identityKey(),
+          buildId: "base-confirm",
+          identityKey: identityKey(),
+          metadata: { source: "test" },
+          createdAt: "1970-01-01T00:00:00.000Z",
+        },
+      }),
+    });
+    if (response.status !== 201) {
+      assert.fail(`Expected 201, got ${response.status}: ${await response.text()}`);
+    }
+    const { event } = await response.json();
+    assert.notEqual(event.id, "client-controlled-id");
+    assert.notEqual(event.createdAt, "1970-01-01T00:00:00.000Z");
+    assert.ok(Date.parse(event.createdAt) > Date.parse("2026-01-01T00:00:00.000Z"));
+
+    const listed = await (await fetch(`${url}/v1/audit-events?repositoryFullName=${encodeURIComponent("acme/widgets")}`)).json();
+    assert.equal(listed.auditEvents.length, 1);
+    assert.equal(listed.auditEvents[0].id, event.id);
+    assert.equal(listed.auditEvents[0].createdAt, event.createdAt);
+  });
+});
+
+test("API comparison store forwards report list limit", async () => {
+  let requestedUrl = "";
+  const store = new ApiComparisonStore("https://snap.example.test", async (url) => {
+    requestedUrl = String(url);
+    return new Response(JSON.stringify({ reports: [] }), { status: 200, headers: { "content-type": "application/json" } });
+  });
+  assert.deepEqual(await store.listComparisonReports({ limit: 7 }), []);
+  assert.equal(requestedUrl, "https://snap.example.test/v1/reports?limit=7");
+});
 
 test("approved PR snapshot promotes only after matching base-branch confirmation", async () => {
   const dir = await mkdtemp(join(tmpdir(), "chroma-snap-m6-promote-"));

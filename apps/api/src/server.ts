@@ -175,8 +175,9 @@ async function route(
     if (!body.event) {
       throw new HttpError(400, "event is required.");
     }
-    await options.reviewStore.saveAuditEvent(body.event);
-    sendJson(res, 201, { event: body.event });
+    const event: AuditEvent = { ...body.event, id: randomUUID(), createdAt: new Date().toISOString() };
+    await options.reviewStore.saveAuditEvent(event);
+    sendJson(res, 201, { event });
     return;
   }
 
