@@ -8,7 +8,7 @@ This repository currently implements the first runnable slice of that plan:
 - An experimental Storybook 10/Vite Vitest browser-mode capture adapter with an automatic `afterEach` screenshot hook.
 - A CLI that initializes config, runs capture commands, normalizes capture events into manifests, and uploads to an API.
 - A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, queue records, baseline lookup, comparison report persistence, GitHub webhooks, strict Checks records, review decisions, audit events, and signed artifact URLs.
-- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, persists comparison reports, handles retry metadata, and seeds local baselines.
+- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, persists comparison reports, handles retry metadata, seeds local baselines, and reconciles approved PR snapshots after base-branch confirmation.
 - A hosted-review HTML renderer/server with a report list, image viewer, approval/rejection forms, decision state, and audit trail display.
 - A GitHub Action wrapper and example workflow.
 
@@ -74,6 +74,17 @@ Process a manifest locally and seed base-branch baselines:
 node apps/worker/dist/index.js --manifest .chroma-snap/capture/manifest.json --seed-baselines
 ```
 
+Reconcile approved PR changes on a confirming base-branch run:
+
+```bash
+node apps/worker/dist/index.js \
+  --manifest .chroma-snap/capture/manifest.json \
+  --baseline-file .chroma-snap/baselines.json \
+  --comparison-file .chroma-snap/comparisons.json \
+  --review-file .chroma-snap/reviews.json \
+  --reconcile-approved
+```
+
 Serve the generated review report:
 
 ```bash
@@ -99,7 +110,7 @@ The adapter remains experimental while Milestone 1 hardening continues. See [`do
 
 ## GitHub App, Checks, and review local seam
 
-Milestones 4 and 5 add webhook ingestion, strict Check Run records, review decisions, audit events, GitHub-permission gates, and signed artifact URLs. See [`docs/github-app.md`](docs/github-app.md) for the local endpoints, required webhook secret, optional GitHub App environment variables for publishing Checks, and review action auth notes.
+Milestones 4, 5, and 6 add webhook ingestion, strict Check Run records, review decisions, audit events, GitHub-permission gates, signed artifact URLs, and approved baseline promotion reconciliation. See [`docs/github-app.md`](docs/github-app.md) for the local endpoints, required webhook secret, optional GitHub App environment variables for publishing Checks, and review action auth notes. See [`docs/dogfood-parallel.md`](docs/dogfood-parallel.md) for the parallel Chromatic dogfood rollout notes.
 
 ## What is intentionally deferred
 

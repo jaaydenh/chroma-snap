@@ -3,6 +3,8 @@ import type { SnapshotManifestEntry } from "./manifest.js";
 export type ComparisonStatus = "unchanged" | "changed" | "new" | "deleted" | "errored" | "pending";
 export type CheckConclusion = "success" | "failure" | "action_required" | "neutral";
 export type ReviewDecisionState = "approved" | "rejected";
+export type BaselinePromotionSource = "seed" | "approved-pr";
+export type BaselinePromotionStatus = "seeded" | "confirmed";
 export type RepositoryPermission = "read" | "triage" | "write" | "maintain" | "admin";
 export type ReviewableRepositoryPermission = Extract<RepositoryPermission, "write" | "maintain" | "admin">;
 
@@ -15,6 +17,18 @@ export interface DiffStats {
   dimensionsChanged: boolean;
 }
 
+export interface BaselinePromotionContext {
+  source: BaselinePromotionSource;
+  status: BaselinePromotionStatus;
+  promotedAt: string;
+  promotedByDecisionId?: string;
+  approvedBuildId?: string;
+  approvedHeadBranch?: string;
+  approvedSha256?: string;
+  baseBranchConfirmedSha?: string;
+  note?: string;
+}
+
 export interface BaselineReference {
   identityKey: string;
   branch: string;
@@ -24,6 +38,7 @@ export interface BaselineReference {
   sha256: string;
   createdAt: string;
   promotedAt: string;
+  promotionContext?: BaselinePromotionContext;
 }
 
 export interface BaselineRecord extends BaselineReference {
@@ -74,7 +89,15 @@ export interface AuditEvent {
     login: string;
     id?: number;
   };
-  eventType: "review_decision.created" | "review_decision.updated" | "artifact_url.signed" | "baseline.promoted" | "build.finalized" | string;
+  eventType:
+    | "review_decision.created"
+    | "review_decision.updated"
+    | "artifact_url.signed"
+    | "baseline.promoted"
+    | "baseline.retired"
+    | "baseline.promotion_mismatch"
+    | "build.finalized"
+    | string;
   subjectType: "snapshot" | "build" | "artifact" | "baseline" | string;
   subjectId: string;
   buildId?: string;

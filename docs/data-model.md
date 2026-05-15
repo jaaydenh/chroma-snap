@@ -28,7 +28,7 @@ repositories
 - **upload_sessions**: short-lived CI upload scopes. A finalized session creates one build.
 - **artifacts**: screenshots, logs, manifests, and diffs in private object storage. Local development stores them on disk.
 - **builds**: a CI/local run for one repository, commit, branch, project, and config hash.
-- **baselines**: canonical accepted snapshots per repository, project, branch, and snapshot identity.
+- **baselines**: canonical accepted snapshots per repository, project, branch, and snapshot identity, with optional promotion context recording seed or approved-PR reconciliation metadata.
 - **comparison_reports**: immutable summary for one build.
 - **snapshot_comparisons**: per-story/mode comparison results, including diff stats and approval requirements.
 - **check_runs**: strict GitHub Check state for one build, including queued/completed status and conclusion.
@@ -71,7 +71,7 @@ The local API stores records under `.chroma-snap/server`:
   reviews.json
 ```
 
-Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts. Milestone 5 adds a file-backed review store for decisions and audit events, plus HMAC-signed artifact URL helpers for private local artifact reads.
+Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts. Milestone 5 adds a file-backed review store for decisions and audit events, plus HMAC-signed artifact URL helpers for private local artifact reads. Milestone 6 records baseline promotion context and uses prior reports plus review decisions to promote approved snapshots or retire approved deletions only after base-branch confirmation.
 
 ## Deferred production work
 
@@ -79,4 +79,4 @@ Milestone 3 adds file-backed baseline and comparison stores that mirror the Post
 - Add a PostgreSQL adapter and connection pooling.
 - Add an S3-compatible `ArtifactStore` implementation.
 - Replace file-backed baseline/comparison stores and retry records with PostgreSQL adapters.
-- Add signed read URLs, GitHub permission checks, and audit-event writes.
+- Add production OAuth session handling and hosted review UI hardening.

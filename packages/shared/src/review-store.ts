@@ -2,11 +2,12 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { withFileStoreLock } from "./file-store-lock.js";
-import type { AuditEvent, ReviewDecision } from "./review.js";
+import type { AuditEvent, ReviewDecision, ReviewDecisionState } from "./review.js";
 
 export interface ReviewDecisionListInput {
-  buildId: string;
+  buildId?: string;
   identityKey?: string;
+  state?: ReviewDecisionState;
 }
 
 export interface AuditEventListInput {
@@ -45,7 +46,9 @@ export class FileReviewStore implements ReviewStore {
   async listReviewDecisions(input: ReviewDecisionListInput): Promise<ReviewDecision[]> {
     const store = await this.readStore();
     return store.decisions
-      .filter((decision) => decision.buildId === input.buildId && (!input.identityKey || decision.identityKey === input.identityKey))
+      .filter((decision) => !input.buildId || decision.buildId === input.buildId)
+      .filter((decision) => !input.identityKey || decision.identityKey === input.identityKey)
+      .filter((decision) => !input.state || decision.state === input.state)
       .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
   }
 
