@@ -4,8 +4,12 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { createGitHubAppJwt, GitHubAppClient, startApiServer, signGitHubWebhookPayload } from "../apps/api/dist/index.js";
+import { createGitHubAppJwt, FileGitHubIntegrationStore, GitHubAppClient, startApiServer, signGitHubWebhookPayload } from "../apps/api/dist/index.js";
 import { MANIFEST_SCHEMA_VERSION, strictCheckConclusionForReport } from "../packages/shared/dist/index.js";
+
+function storeSegment(value) {
+  return `b64_${Buffer.from(value, "utf8").toString("base64url")}`;
+}
 
 async function withApi(options, fn) {
   const storageDir = await mkdtemp(join(tmpdir(), "chroma-snap-m4-api-"));
@@ -178,6 +182,22 @@ test("GitHub webhook endpoint verifies signatures, stores installations, and ded
   });
 });
 
+test("GitHub file store keeps colliding-looking refs in distinct files", async () => {
+  const storageDir = await mkdtemp(join(tmpdir(), "chroma-snap-github-store-"));
+  try {
+    const store = new FileGitHubIntegrationStore(storageDir);
+    await Promise.all([
+      store.saveRef({ repositoryFullName: "acme/widgets", ref: "refs/heads/a/b", sha: "slash-sha", updatedAt: "2026-05-15T00:00:00.000Z" }),
+      store.saveRef({ repositoryFullName: "acme/widgets", ref: "refs/heads/a__b", sha: "underscore-sha", updatedAt: "2026-05-15T00:00:00.000Z" }),
+    ]);
+
+    assert.equal((await store.getRef("acme/widgets", "refs/heads/a/b")).sha, "slash-sha");
+    assert.equal((await store.getRef("acme/widgets", "refs/heads/a__b")).sha, "underscore-sha");
+  } finally {
+    await rm(storageDir, { recursive: true, force: true });
+  }
+});
+
 test("GitHub pull_request and push webhooks persist PR/base metadata", async () => {
   const secret = "webhook-secret";
   await withApi({ githubWebhookSecret: secret }, async ({ storageDir, url }) => {
@@ -228,12 +248,12 @@ test("GitHub pull_request and push webhooks persist PR/base metadata", async () 
       202,
     );
 
-    const pr = JSON.parse(await readFile(resolve(storageDir, "github", "pull-requests", "acme__widgets", "42.json"), "utf8"));
+    const pr = JSON.parse(await readFile(resolve(storageDir, "github", "pull-requests", storeSegment("acme/widgets"), "42.json"), "utf8"));
     assert.equal(pr.headSha, "head-sha");
     assert.equal(pr.baseRef, "main");
     assert.equal(pr.senderLogin, "octocat");
 
-    const ref = JSON.parse(await readFile(resolve(storageDir, "github", "refs", "acme__widgets", "refs__heads__main.json"), "utf8"));
+    const ref = JSON.parse(await readFile(resolve(storageDir, "github", "refs", storeSegment("acme/widgets"), `${storeSegment("refs/heads/main")}.json`), "utf8"));
     assert.equal(ref.sha, "after-sha");
     assert.equal(ref.before, "before-sha");
   });

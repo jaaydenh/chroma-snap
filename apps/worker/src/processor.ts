@@ -39,26 +39,23 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
   const currentIdentityKeys = new Set(manifest.snapshots.map((snapshot) => snapshot.identityKey));
   const comparisons: SnapshotComparison[] = [];
   const warnings: string[] = [];
+  const branchBaselineInput = {
+    repositoryFullName: manifest.repository.fullName,
+    projectName: manifest.project.name,
+    branch: baseBranch,
+  };
+  const branchBaselines = await baselineStore.listBaselinesForBranch(branchBaselineInput);
+  const baselinesByIdentityKey = new Map(branchBaselines.map((baseline) => [baseline.identityKey, baseline]));
 
   if (!options.seedBaselines && isBaseBranchRun) {
     warnings.push("Base-branch run processed without baseline promotion. Use seedBaselines for initial seeding or approved promotion reconciliation.");
   }
 
   for (const snapshot of manifest.snapshots) {
-    const baseline = await baselineStore.lookupBaseline({
-      repositoryFullName: manifest.repository.fullName,
-      projectName: manifest.project.name,
-      branch: baseBranch,
-      identityKey: snapshot.identityKey,
-    });
+    const baseline = baselinesByIdentityKey.get(snapshot.identityKey);
     comparisons.push(await compareSnapshot(snapshot, baseline, manifest, manifestDir, options.outputDir, options.artifactStore));
   }
 
-  const branchBaselines = await baselineStore.listBaselinesForBranch({
-    repositoryFullName: manifest.repository.fullName,
-    projectName: manifest.project.name,
-    branch: baseBranch,
-  });
   for (const baseline of branchBaselines) {
     if (!currentIdentityKeys.has(baseline.identityKey)) {
       comparisons.push({
@@ -74,11 +71,9 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
   }
 
   if (isBaseBranchRun && options.seedBaselines) {
-    for (const snapshot of manifest.snapshots) {
-      if (snapshot.status !== "captured" || !snapshot.image?.sha256) {
-        continue;
-      }
-      await baselineStore.promoteBaseline(
+    const recordsToPromote = manifest.snapshots
+      .filter((snapshot) => snapshot.status === "captured" && Boolean(snapshot.image?.sha256))
+      .map((snapshot) =>
         createBaselineRecord({
           manifest,
           snapshot,
@@ -88,7 +83,7 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
           now,
         }),
       );
-    }
+    await baselineStore.promoteBaselines(recordsToPromote);
   }
 
   if (isBaseBranchRun && options.seedBaselines) {

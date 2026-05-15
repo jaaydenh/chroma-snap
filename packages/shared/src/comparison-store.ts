@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { withFileStoreLock } from "./file-store-lock.js";
 import type { ComparisonReport, SnapshotComparison } from "./review.js";
 
 export interface ComparisonStore {
@@ -16,9 +18,11 @@ export class FileComparisonStore implements ComparisonStore {
   constructor(private readonly path: string) {}
 
   async saveComparisonReport(report: ComparisonReport): Promise<void> {
-    const store = await this.readStore();
-    store.reports[report.buildId] = report;
-    await this.writeStore(store);
+    await withFileStoreLock(this.path, async () => {
+      const store = await this.readStore();
+      store.reports[report.buildId] = report;
+      await this.writeStore(store);
+    });
   }
 
   async getComparisonReport(buildId: string): Promise<ComparisonReport | undefined> {
@@ -43,7 +47,7 @@ export class FileComparisonStore implements ComparisonStore {
 
   async writeStore(store: ComparisonStoreDocument): Promise<void> {
     await mkdir(dirname(resolve(this.path)), { recursive: true });
-    const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
     await rename(temp, this.path);
   }

@@ -1,6 +1,8 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { hashObject } from "./hash.js";
+import { withFileStoreLock } from "./file-store-lock.js";
 import type { BaselineRecord } from "./review.js";
 
 export interface BaselineLookupInput {
@@ -20,6 +22,7 @@ export interface BaselineStore {
   lookupBaseline(input: BaselineLookupInput): Promise<BaselineRecord | undefined>;
   listBaselinesForBranch(input: BaselineBranchInput): Promise<BaselineRecord[]>;
   promoteBaseline(record: BaselineRecord): Promise<void>;
+  promoteBaselines(records: BaselineRecord[]): Promise<void>;
   deleteBaseline(input: BaselineLookupInput): Promise<void>;
 }
 
@@ -56,15 +59,24 @@ export class FileBaselineStore implements BaselineStore {
   }
 
   async promoteBaseline(record: BaselineRecord): Promise<void> {
-    const store = await this.readStore();
-    store.records[baselineRecordKey(record)] = record;
-    await this.writeStore(store);
+    await this.promoteBaselines([record]);
+  }
+
+  async promoteBaselines(records: BaselineRecord[]): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
+    await this.updateStore((store) => {
+      for (const record of records) {
+        store.records[baselineRecordKey(record)] = record;
+      }
+    });
   }
 
   async deleteBaseline(input: BaselineLookupInput): Promise<void> {
-    const store = await this.readStore();
-    delete store.records[baselineRecordKey(input)];
-    await this.writeStore(store);
+    await this.updateStore((store) => {
+      delete store.records[baselineRecordKey(input)];
+    });
   }
 
   async readStore(): Promise<BaselineStoreDocument> {
@@ -80,8 +92,16 @@ export class FileBaselineStore implements BaselineStore {
 
   async writeStore(store: BaselineStoreDocument): Promise<void> {
     await mkdir(dirname(resolve(this.path)), { recursive: true });
-    const temp = `${this.path}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${this.path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
     await rename(temp, this.path);
+  }
+
+  private async updateStore(mutator: (store: BaselineStoreDocument) => void): Promise<void> {
+    await withFileStoreLock(this.path, async () => {
+      const store = await this.readStore();
+      mutator(store);
+      await this.writeStore(store);
+    });
   }
 }

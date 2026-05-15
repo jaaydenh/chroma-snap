@@ -101,6 +101,47 @@ test("processor seeds base baselines and classifies PR diffs", async () => {
   assert.equal((await comparisonStore.getComparisonReport("pr")).summary.changed, 1);
 });
 
+test("processor loads branch baselines once and batch-promotes seeded baselines", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "chroma-snap-worker-batch-"));
+  const first = manifest({ branch: "main", imagePath: undefined, sha: "sha-one", identityKey: "seed-one", id: "seed-batch" });
+  first.snapshots.push({
+    ...first.snapshots[0],
+    identityKey: "seed-two",
+    image: { ...first.snapshots[0].image, sha256: "sha-two" },
+  });
+
+  let listCalls = 0;
+  let promotedRecords = [];
+  const baselineStore = {
+    async lookupBaseline() {
+      throw new Error("lookupBaseline should not be called for each snapshot");
+    },
+    async listBaselinesForBranch() {
+      listCalls += 1;
+      return [];
+    },
+    async promoteBaseline() {
+      throw new Error("promoteBaseline should not be called for each seeded snapshot");
+    },
+    async promoteBaselines(records) {
+      promotedRecords = records;
+    },
+    async deleteBaseline() {},
+  };
+
+  const report = await processManifest(first, {
+    baselineStore,
+    outputDir: join(dir, "report"),
+    seedBaselines: true,
+    now: new Date("2026-05-13T00:00:00.000Z"),
+  });
+
+  assert.equal(listCalls, 1);
+  assert.equal(promotedRecords.length, 2);
+  assert.deepEqual(promotedRecords.map((record) => record.identityKey).sort(), ["seed-one", "seed-two"]);
+  assert.equal(report.summary.new, 2);
+});
+
 test("processor includes capture error stack, timeout, and logs in failure messages", async () => {
   const dir = await mkdtemp(join(tmpdir(), "chroma-snap-error-"));
   const report = await processManifest(

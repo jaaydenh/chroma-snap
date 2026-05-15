@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
@@ -100,12 +101,12 @@ export class FileGitHubIntegrationStore implements GitHubIntegrationStore {
 
   private async writeJson(path: string, value: unknown): Promise<void> {
     await mkdir(dirname(path), { recursive: true });
-    const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+    const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
     await rename(temp, path);
   }
 }
 
 function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "__");
+  return `b64_${Buffer.from(value, "utf8").toString("base64url")}`;
 }

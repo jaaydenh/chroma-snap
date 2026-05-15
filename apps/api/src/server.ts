@@ -140,7 +140,7 @@ async function route(
 
   const baselineMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/baselines$/);
   if (req.method === "GET" && baselineMatch) {
-    const build = await readJsonFile<StoredBuildRecord>(resolve(options.storageDir, "builds", baselineMatch[1]!, "build.json"));
+    const build = await readBuildRecord(options.storageDir, baselineMatch[1]!);
     const branch = url.searchParams.get("branch") ?? build.git.baseBranch ?? build.git.branch;
     const identityKey = url.searchParams.get("identityKey") ?? undefined;
     if (identityKey) {
@@ -167,16 +167,19 @@ async function route(
   }
 
   if (req.method === "PUT" && url.pathname === "/v1/baselines") {
-    const body = await readJson<{ baseline?: BaselineRecord }>(req);
-    if (!body.baseline) {
-      throw new HttpError(400, "baseline is required.");
+    await assertUploadAuth(req, options);
+    const body = await readJson<{ baseline?: BaselineRecord; baselines?: BaselineRecord[] }>(req);
+    const baselines = Array.isArray(body.baselines) ? body.baselines : body.baseline ? [body.baseline] : [];
+    if (baselines.length === 0) {
+      throw new HttpError(400, "baseline or baselines is required.");
     }
-    await options.baselineStore.promoteBaseline(body.baseline);
+    await options.baselineStore.promoteBaselines(baselines);
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (req.method === "DELETE" && url.pathname === "/v1/baselines") {
+    await assertUploadAuth(req, options);
     const body = await readJson<BaselineLookupInput>(req);
     await options.baselineStore.deleteBaseline(body);
     sendJson(res, 200, { ok: true });
@@ -185,6 +188,7 @@ async function route(
 
   const comparisonMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/comparison-report$/);
   if (comparisonMatch && (req.method === "PUT" || req.method === "POST")) {
+    await assertUploadAuth(req, options);
     const body = await readJson<{ report?: ComparisonReport }>(req);
     if (!body.report) {
       throw new HttpError(400, "report is required.");
@@ -192,8 +196,9 @@ async function route(
     if (body.report.buildId !== comparisonMatch[1]) {
       throw new HttpError(400, "Comparison report buildId does not match URL.");
     }
+    const build = await readBuildRecord(options.storageDir, comparisonMatch[1]!);
     await options.comparisonStore.saveComparisonReport(body.report);
-    await markBuildCompared(options, body.report);
+    await markBuildCompared(options, build, body.report);
     sendJson(res, 200, { ok: true });
     return;
   }
@@ -218,7 +223,8 @@ async function route(
   }
 
   if (checkRunMatch && req.method === "POST") {
-    const build = await readJsonFile<StoredBuildRecord>(resolve(options.storageDir, "builds", checkRunMatch[1]!, "build.json"));
+    await assertUploadAuth(req, options);
+    const build = await readBuildRecord(options.storageDir, checkRunMatch[1]!);
     const report = await options.comparisonStore.getComparisonReport(checkRunMatch[1]!);
     const checkRun = await publishGitHubCheckRun(build, report, options);
     sendJson(res, 202, { checkRun });
@@ -227,7 +233,7 @@ async function route(
 
   const buildMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)$/);
   if (req.method === "GET" && buildMatch) {
-    const build = await readJsonFile(resolve(options.storageDir, "builds", buildMatch[1]!, "build.json"));
+    const build = await readBuildRecord(options.storageDir, buildMatch[1]!);
     sendJson(res, 200, build);
     return;
   }
@@ -353,10 +359,9 @@ async function finalizeUploadSession(
 
 async function markBuildCompared(
   options: Required<Pick<ApiServerOptions, "storageDir" | "publicUrl" | "githubStore">> & ApiServerOptions,
+  build: StoredBuildRecord,
   report: ComparisonReport,
 ): Promise<void> {
-  const buildPath = resolve(options.storageDir, "builds", report.buildId, "build.json");
-  const build = await readJsonFile<StoredBuildRecord>(buildPath);
   const updated: StoredBuildRecord = {
     ...build,
     status: report.checkConclusion === "failure" ? "failed" : "completed",
@@ -364,7 +369,7 @@ async function markBuildCompared(
     checkConclusion: strictCheckConclusionForReport(report),
     summary: report.summary,
   };
-  await writeJsonFile(buildPath, updated);
+  await writeJsonFile(buildRecordPath(options.storageDir, report.buildId), updated);
   await publishGitHubCheckRun(updated, report, options);
 }
 
@@ -680,6 +685,21 @@ function sessionPath(storageDir: string, sessionId: string): string {
   return resolve(storageDir, "sessions", `${sessionId}.json`);
 }
 
+function buildRecordPath(storageDir: string, buildId: string): string {
+  return resolve(storageDir, "builds", buildId, "build.json");
+}
+
+async function readBuildRecord(storageDir: string, buildId: string): Promise<StoredBuildRecord> {
+  try {
+    return await readJsonFile<StoredBuildRecord>(buildRecordPath(storageDir, buildId));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new HttpError(404, "Build not found.");
+    }
+    throw error;
+  }
+}
+
 async function readJson<T>(req: IncomingMessage): Promise<T> {
   return JSON.parse((await readBody(req)).toString("utf8")) as T;
 }
@@ -698,7 +718,7 @@ async function readJsonFile<T = unknown>(path: string): Promise<T> {
 
 async function writeJsonFile(path: string, value: unknown): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  const temp = `${path}.${process.pid}.${Date.now()}.tmp`;
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
   await rename(temp, path);
 }

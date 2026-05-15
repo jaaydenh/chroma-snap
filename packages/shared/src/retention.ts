@@ -28,7 +28,11 @@ export function retentionCutoff(now: Date, retentionDays: number): Date {
 }
 
 export function isExpired(createdAt: string, now: Date, retentionDays: number): boolean {
-  return new Date(createdAt).getTime() < retentionCutoff(now, retentionDays).getTime();
+  const createdAtMs = new Date(createdAt).getTime();
+  if (!Number.isFinite(createdAtMs)) {
+    return true;
+  }
+  return createdAtMs < retentionCutoff(now, retentionDays).getTime();
 }
 
 export function retentionDaysForKind(policy: RetentionPolicy, kind: RetentionCandidate["kind"]): number {

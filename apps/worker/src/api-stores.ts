@@ -7,16 +7,21 @@ import type {
   ComparisonStore,
 } from "@chroma-snap/shared";
 
+type HeaderProvider = HeadersInit | (() => HeadersInit | Promise<HeadersInit>);
+
 export class ApiBaselineStore implements BaselineStore {
   constructor(
     private readonly baseUrl: string,
     private readonly buildId: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly headers?: HeaderProvider,
   ) {}
 
   async lookupBaseline(input: BaselineLookupInput): Promise<BaselineRecord | undefined> {
     const params = new URLSearchParams({ branch: input.branch, identityKey: input.identityKey });
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(this.buildId)}/baselines?${params}`);
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(this.buildId)}/baselines?${params}`, {
+      headers: await requestHeaders(this.headers),
+    });
     if (response.status === 404) {
       return undefined;
     }
@@ -29,7 +34,9 @@ export class ApiBaselineStore implements BaselineStore {
 
   async listBaselinesForBranch(input: BaselineBranchInput): Promise<BaselineRecord[]> {
     const params = new URLSearchParams({ branch: input.branch });
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(this.buildId)}/baselines?${params}`);
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(this.buildId)}/baselines?${params}`, {
+      headers: await requestHeaders(this.headers),
+    });
     if (!response.ok) {
       throw new Error(`Baseline list failed with ${response.status}: ${await response.text()}`);
     }
@@ -38,10 +45,17 @@ export class ApiBaselineStore implements BaselineStore {
   }
 
   async promoteBaseline(record: BaselineRecord): Promise<void> {
+    await this.promoteBaselines([record]);
+  }
+
+  async promoteBaselines(records: BaselineRecord[]): Promise<void> {
+    if (records.length === 0) {
+      return;
+    }
     const response = await this.fetchImpl(`${this.baseUrl}/v1/baselines`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ baseline: record }),
+      headers: await jsonHeaders(this.headers),
+      body: JSON.stringify({ baselines: records }),
     });
     if (!response.ok) {
       throw new Error(`Baseline promotion failed with ${response.status}: ${await response.text()}`);
@@ -51,7 +65,7 @@ export class ApiBaselineStore implements BaselineStore {
   async deleteBaseline(input: BaselineLookupInput): Promise<void> {
     const response = await this.fetchImpl(`${this.baseUrl}/v1/baselines`, {
       method: "DELETE",
-      headers: { "content-type": "application/json" },
+      headers: await jsonHeaders(this.headers),
       body: JSON.stringify(input),
     });
     if (!response.ok && response.status !== 404) {
@@ -64,12 +78,13 @@ export class ApiComparisonStore implements ComparisonStore {
   constructor(
     private readonly baseUrl: string,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly headers?: HeaderProvider,
   ) {}
 
   async saveComparisonReport(report: ComparisonReport): Promise<void> {
     const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(report.buildId)}/comparison-report`, {
       method: "PUT",
-      headers: { "content-type": "application/json" },
+      headers: await jsonHeaders(this.headers),
       body: JSON.stringify({ report }),
     });
     if (!response.ok) {
@@ -78,7 +93,9 @@ export class ApiComparisonStore implements ComparisonStore {
   }
 
   async getComparisonReport(buildId: string): Promise<ComparisonReport | undefined> {
-    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(buildId)}/comparison-report`);
+    const response = await this.fetchImpl(`${this.baseUrl}/v1/builds/${encodeURIComponent(buildId)}/comparison-report`, {
+      headers: await requestHeaders(this.headers),
+    });
     if (response.status === 404) {
       return undefined;
     }
@@ -88,4 +105,14 @@ export class ApiComparisonStore implements ComparisonStore {
     const body = (await response.json()) as { report?: ComparisonReport };
     return body.report;
   }
+}
+
+async function requestHeaders(provider: HeaderProvider | undefined): Promise<Headers> {
+  return new Headers(typeof provider === "function" ? await provider() : provider);
+}
+
+async function jsonHeaders(provider: HeaderProvider | undefined): Promise<Headers> {
+  const headers = await requestHeaders(provider);
+  headers.set("content-type", "application/json");
+  return headers;
 }

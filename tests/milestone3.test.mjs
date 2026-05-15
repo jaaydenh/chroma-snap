@@ -50,9 +50,9 @@ function comparisonReport(overrides = {}) {
   };
 }
 
-async function withApi(fn) {
+async function withApi(fn, options = {}) {
   const storageDir = await mkdtemp(join(tmpdir(), "chroma-snap-m3-api-"));
-  const { server, url } = await startApiServer({ allowDevAuth: true, host: "127.0.0.1", port: 0, storageDir });
+  const { server, url } = await startApiServer({ allowDevAuth: true, host: "127.0.0.1", port: 0, storageDir, ...options });
   try {
     await fn({ storageDir, url });
   } finally {
@@ -82,6 +82,20 @@ test("file baseline and comparison stores persist records idempotently", async (
   await comparisonStore.saveComparisonReport(report);
   await comparisonStore.saveComparisonReport({ ...report, warnings: ["reprocessed"] });
   assert.deepEqual((await comparisonStore.getComparisonReport("pr-build")).warnings, ["reprocessed"]);
+
+  await Promise.all([
+    baselineStore.promoteBaseline(baselineRecord({ identityKey: "concurrent-a", sha256: "sha-a" })),
+    baselineStore.promoteBaseline(baselineRecord({ identityKey: "concurrent-b", sha256: "sha-b" })),
+  ]);
+  const concurrentBaselines = await baselineStore.listBaselinesForBranch({ repositoryFullName: "acme/widgets", projectName: "storybook", branch: "main" });
+  assert.equal(concurrentBaselines.filter((record) => record.identityKey.startsWith("concurrent-")).length, 2);
+
+  await Promise.all([
+    comparisonStore.saveComparisonReport(comparisonReport({ buildId: "concurrent-report-a", warnings: ["a"] })),
+    comparisonStore.saveComparisonReport(comparisonReport({ buildId: "concurrent-report-b", warnings: ["b"] })),
+  ]);
+  assert.deepEqual((await comparisonStore.getComparisonReport("concurrent-report-a")).warnings, ["a"]);
+  assert.deepEqual((await comparisonStore.getComparisonReport("concurrent-report-b")).warnings, ["b"]);
 });
 
 test("API exposes baseline lookup and comparison record endpoints", async () => {
@@ -127,6 +141,49 @@ test("API exposes baseline lookup and comparison record endpoints", async () => 
     const build = JSON.parse(await readFile(resolve(storageDir, "builds", "pr-build", "build.json"), "utf8"));
     assert.equal(build.status, "failed");
     assert.equal(build.checkConclusion, "failure");
+  });
+});
+
+test("API protects write endpoints and returns 404 for missing build routes", async () => {
+  await withApi(
+    async ({ url }) => {
+      const baselineResponse = await fetch(`${url}/v1/baselines`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ baseline: baselineRecord() }),
+      });
+      assert.equal(baselineResponse.status, 401);
+
+      const deleteResponse = await fetch(`${url}/v1/baselines`, {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositoryFullName: "acme/widgets", projectName: "storybook", branch: "main", identityKey: "missing" }),
+      });
+      assert.equal(deleteResponse.status, 401);
+
+      const reportResponse = await fetch(`${url}/v1/builds/missing/comparison-report`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ report: comparisonReport({ buildId: "missing" }) }),
+      });
+      assert.equal(reportResponse.status, 401);
+
+      const checkResponse = await fetch(`${url}/v1/builds/missing/check-run`, { method: "POST" });
+      assert.equal(checkResponse.status, 401);
+    },
+    { allowDevAuth: false },
+  );
+
+  await withApi(async ({ url }) => {
+    assert.equal((await fetch(`${url}/v1/builds/missing`)).status, 404);
+    assert.equal((await fetch(`${url}/v1/builds/missing/baselines`)).status, 404);
+    assert.equal((await fetch(`${url}/v1/builds/missing/check-run`, { method: "POST" })).status, 404);
+    const response = await fetch(`${url}/v1/builds/missing/comparison-report`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ report: comparisonReport({ buildId: "missing" }) }),
+    });
+    assert.equal(response.status, 404);
   });
 });
 
@@ -176,6 +233,7 @@ test("retention planning expires old unprotected records by kind", () => {
       { id: "protected-baseline", kind: "artifact", createdAt: "2026-01-01T00:00:00.000Z", protected: true },
       { id: "recent-comparison", kind: "comparison", createdAt: "2026-05-01T00:00:00.000Z" },
       { id: "old-queue", kind: "queue-job", createdAt: "2026-04-01T00:00:00.000Z" },
+      { id: "invalid-created-at", kind: "artifact", createdAt: "not-a-date" },
     ],
     { buildArtifactRetentionDays: 90, comparisonRetentionDays: 30, queueJobRetentionDays: 7 },
     now,
@@ -183,7 +241,7 @@ test("retention planning expires old unprotected records by kind", () => {
 
   assert.deepEqual(
     sweep.expired.map((candidate) => candidate.id).sort(),
-    ["old-artifact", "old-queue"],
+    ["invalid-created-at", "old-artifact", "old-queue"],
   );
   assert.deepEqual(
     sweep.retained.map((candidate) => candidate.id).sort(),
