@@ -68,9 +68,10 @@ The local API stores records under `.chroma-snap/server`:
   github/check-runs/{buildId}.json
   baselines.json
   comparisons.json
+  reviews.json
 ```
 
-Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts.
+Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts. Milestone 5 adds a file-backed review store for decisions and audit events, plus HMAC-signed artifact URL helpers for private local artifact reads.
 
 ## Deferred production work
 

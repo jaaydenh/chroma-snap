@@ -1,16 +1,21 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { dirname, extname, resolve } from "node:path";
 import {
+  applyReviewDecisionsToReport,
   assertValidManifest,
   checkOutputForComparisonReport,
   checkOutputForQueuedBuild,
+  createSignedArtifactUrl,
   DEFAULT_GITHUB_CHECK_NAME,
   FileArtifactStore,
   FileBaselineStore,
   FileComparisonStore,
+  FileReviewStore,
+  isReviewableRepositoryPermission,
   strictCheckConclusionForReport,
+  verifyArtifactSignature,
   type ArtifactStore,
   type BaselineLookupInput,
   type BaselineRecord,
@@ -27,6 +32,12 @@ import {
   type GitHubRefRecord,
   type GitHubRepositoryDescriptor,
   type GitHubWebhookEventRecord,
+  type RepositoryPermission,
+  type ReviewDecision,
+  type ReviewDecisionRequest,
+  type ReviewStore,
+  type ReviewableRepositoryPermission,
+  type SnapshotComparison,
   type UploadSessionResponse,
 } from "@chroma-snap/shared";
 import { type GitHubCheckPublisher, verifyGitHubWebhookSignature } from "./github-app.js";
@@ -34,6 +45,15 @@ import { FileGitHubIntegrationStore, type GitHubIntegrationStore } from "./githu
 import { decodeJwtPayloadWithoutVerifying, validateGitHubActionsOidcClaims } from "./oidc.js";
 import { objectKeyForArtifact, type StoredSession } from "./session.js";
 import { verifyUploadIntegrity } from "./upload-integrity.js";
+
+export interface GitHubPermissionVerifier {
+  getRepositoryPermission(input: {
+    repositoryFullName: string;
+    login: string;
+    accessToken?: string;
+    installationId?: number;
+  }): Promise<RepositoryPermission | undefined>;
+}
 
 export interface ApiServerOptions {
   host?: string;
@@ -45,10 +65,14 @@ export interface ApiServerOptions {
   artifactStore?: ArtifactStore;
   baselineStore?: BaselineStore;
   comparisonStore?: ComparisonStore;
+  reviewStore?: ReviewStore;
   githubStore?: GitHubIntegrationStore;
   githubCheckPublisher?: GitHubCheckPublisher;
   githubWebhookSecret?: string;
   githubCheckName?: string;
+  githubPermissionVerifier?: GitHubPermissionVerifier;
+  artifactSigningSecret?: string;
+  signedArtifactUrlTtlSeconds?: number;
   oidcAudience?: string;
 }
 
@@ -73,13 +97,14 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
   const artifactStore = options.artifactStore ?? new FileArtifactStore(storageDir);
   const baselineStore = options.baselineStore ?? new FileBaselineStore(resolve(storageDir, "baselines.json"));
   const comparisonStore = options.comparisonStore ?? new FileComparisonStore(resolve(storageDir, "comparisons.json"));
+  const reviewStore = options.reviewStore ?? new FileReviewStore(resolve(storageDir, "reviews.json"));
   const githubStore = options.githubStore ?? new FileGitHubIntegrationStore(storageDir);
   let publicUrl = options.publicUrl ?? `http://${host}:${port}`;
   await mkdir(storageDir, { recursive: true });
 
   const server = createServer(async (req, res) => {
     try {
-      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore, baselineStore, comparisonStore, githubStore });
+      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore, baselineStore, comparisonStore, reviewStore, githubStore });
     } catch (error) {
       sendJson(res, error instanceof HttpError ? error.status : 500, {
         error: error instanceof Error ? error.message : String(error),
@@ -97,12 +122,27 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
-  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore" | "baselineStore" | "comparisonStore" | "githubStore">> & ApiServerOptions,
+  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore" | "baselineStore" | "comparisonStore" | "reviewStore" | "githubStore">> & ApiServerOptions,
 ): Promise<void> {
   const url = new URL(req.url ?? "/", options.publicUrl);
 
   if (req.method === "GET" && url.pathname === "/healthz") {
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/artifacts") {
+    await sendSignedArtifact(req, res, url, options);
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/reports") {
+    const limit = parsePositiveInteger(url.searchParams.get("limit"));
+    const reports = options.comparisonStore.listComparisonReports ? await options.comparisonStore.listComparisonReports({ limit }) : [];
+    const reviewedReports = await Promise.all(
+      reports.map(async (report) => applyReviewDecisionsToReport(report, await options.reviewStore.listReviewDecisions({ buildId: report.buildId }))),
+    );
+    sendJson(res, 200, { reports: reviewedReports });
     return;
   }
 
@@ -198,17 +238,95 @@ async function route(
     }
     const build = await readBuildRecord(options.storageDir, comparisonMatch[1]!);
     await options.comparisonStore.saveComparisonReport(body.report);
-    await markBuildCompared(options, build, body.report);
+    const decisions = await options.reviewStore.listReviewDecisions({ buildId: body.report.buildId });
+    await markBuildCompared(options, build, applyReviewDecisionsToReport(body.report, decisions));
     sendJson(res, 200, { ok: true });
     return;
   }
 
   if (comparisonMatch && req.method === "GET") {
-    const report = await options.comparisonStore.getComparisonReport(comparisonMatch[1]!);
+    const buildId = comparisonMatch[1]!;
+    const report = await options.comparisonStore.getComparisonReport(buildId);
     if (!report) {
       throw new HttpError(404, "Comparison report not found.");
     }
-    sendJson(res, 200, { report });
+    const decisions = await options.reviewStore.listReviewDecisions({ buildId });
+    sendJson(res, 200, { report: applyReviewDecisionsToReport(report, decisions), decisions });
+    return;
+  }
+
+  const reviewMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/review$/);
+  if (reviewMatch && req.method === "GET") {
+    const buildId = reviewMatch[1]!;
+    const build = await readBuildRecord(options.storageDir, buildId);
+    const report = await options.comparisonStore.getComparisonReport(buildId);
+    if (!report) {
+      throw new HttpError(404, "Comparison report not found.");
+    }
+    const decisions = await options.reviewStore.listReviewDecisions({ buildId });
+    const reviewedReport = applyReviewDecisionsToReport(report, decisions);
+    const auditEvents = await options.reviewStore.listAuditEvents({ repositoryFullName: build.repository.fullName, buildId });
+    sendJson(res, 200, {
+      build,
+      report: reviewedReport,
+      decisions,
+      auditEvents,
+      artifactUrls: signedArtifactUrlsForReport(reviewedReport, options, buildId),
+    });
+    return;
+  }
+
+  const decisionMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/decisions$/);
+  if (decisionMatch && req.method === "GET") {
+    const buildId = decisionMatch[1]!;
+    await readBuildRecord(options.storageDir, buildId);
+    const identityKey = url.searchParams.get("identityKey") ?? undefined;
+    const decisions = await options.reviewStore.listReviewDecisions({ buildId, identityKey });
+    sendJson(res, 200, { decisions });
+    return;
+  }
+
+  if (decisionMatch && req.method === "POST") {
+    const buildId = decisionMatch[1]!;
+    const payload = await readJsonOrForm<ReviewDecisionRequest & ReviewDecisionFormFields>(req);
+    const decision = await createReviewDecision(buildId, payload, req, options);
+    if (isFormRequest(req)) {
+      res.statusCode = 303;
+      res.setHeader("location", req.headers.referer ?? `${options.publicUrl}/v1/builds/${buildId}/review`);
+      res.end();
+      return;
+    }
+    sendJson(res, 201, { decision });
+    return;
+  }
+
+  const auditMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/audit-events$/);
+  if (auditMatch && req.method === "GET") {
+    const build = await readBuildRecord(options.storageDir, auditMatch[1]!);
+    const events = await options.reviewStore.listAuditEvents({ repositoryFullName: build.repository.fullName, buildId: build.buildId, limit: parsePositiveInteger(url.searchParams.get("limit")) });
+    sendJson(res, 200, { auditEvents: events });
+    return;
+  }
+
+  const artifactUrlMatch = url.pathname.match(/^\/v1\/builds\/([^/]+)\/artifact-url$/);
+  if (artifactUrlMatch && req.method === "GET") {
+    const buildId = artifactUrlMatch[1]!;
+    const objectKey = url.searchParams.get("objectKey") ?? undefined;
+    if (!objectKey) {
+      throw new HttpError(400, "objectKey is required.");
+    }
+    const build = await readBuildRecord(options.storageDir, buildId);
+    const report = await options.comparisonStore.getComparisonReport(buildId);
+    if (!report) {
+      throw new HttpError(404, "Comparison report not found.");
+    }
+    if (!artifactObjectKeysForReport(report).has(objectKey)) {
+      throw new HttpError(404, "Artifact is not referenced by this build report.");
+    }
+    await assertArtifactReadAccess(req, build, options);
+    const expiresAt = new Date(Date.now() + signedArtifactTtlMs(options)).toISOString();
+    const signedUrl = createSignedArtifactUrl({ publicUrl: options.publicUrl, objectKey, buildId, expiresAt, secret: artifactSigningSecret(options) });
+    sendJson(res, 200, { url: signedUrl, expiresAt });
     return;
   }
 
@@ -305,7 +423,7 @@ async function finalizeUploadSession(
 ): Promise<FinalizeUploadSessionResponse> {
   const session = await readJsonFile<StoredSession>(sessionPath(options.storageDir, sessionId));
   if (session.finalized) {
-    return { buildId: session.buildId, status: "accepted", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}` };
+    return { buildId: session.buildId, status: "accepted", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}/review` };
   }
   if (new Date(session.expiresAt).getTime() < Date.now()) {
     throw new HttpError(410, "Upload session expired.");
@@ -354,7 +472,7 @@ async function finalizeUploadSession(
   session.finalized = true;
   await writeJsonFile(sessionPath(options.storageDir, sessionId), session);
 
-  return { buildId: session.buildId, status: "queued", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}` };
+  return { buildId: session.buildId, status: "queued", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}/review` };
 }
 
 async function markBuildCompared(
@@ -387,14 +505,14 @@ async function publishGitHubCheckRun(
         headSha: build.git.commitSha,
         status: "completed",
         conclusion: strictCheckConclusionForReport(report),
-        detailsUrl: `${options.publicUrl}/v1/builds/${build.buildId}`,
+        detailsUrl: `${options.publicUrl}/v1/builds/${build.buildId}/review`,
         output: checkOutputForComparisonReport(report),
       }
     : {
         name: existing?.name ?? options.githubCheckName ?? DEFAULT_GITHUB_CHECK_NAME,
         headSha: build.git.commitSha,
         status: "queued",
-        detailsUrl: `${options.publicUrl}/v1/builds/${build.buildId}`,
+        detailsUrl: `${options.publicUrl}/v1/builds/${build.buildId}/review`,
         output: checkOutputForQueuedBuild(),
       };
 
@@ -433,6 +551,262 @@ async function publishGitHubCheckRun(
   };
   await options.githubStore.saveCheckRun(record);
   return record;
+}
+
+interface ReviewDecisionFormFields {
+  githubLogin?: string;
+  githubUserId?: number | string;
+  repositoryPermission?: RepositoryPermission;
+  user?: {
+    login?: string;
+    id?: number | string;
+    repositoryPermission?: RepositoryPermission;
+  };
+}
+
+interface ResolvedRepositoryAccess {
+  provider: "github";
+  login: string;
+  id?: number;
+  repositoryPermission: RepositoryPermission;
+}
+
+async function createReviewDecision(
+  buildId: string,
+  payload: ReviewDecisionRequest & ReviewDecisionFormFields,
+  req: IncomingMessage,
+  options: Required<Pick<ApiServerOptions, "storageDir" | "publicUrl" | "comparisonStore" | "reviewStore" | "githubStore">> & ApiServerOptions,
+): Promise<ReviewDecision> {
+  if (!payload.identityKey) {
+    throw new HttpError(400, "identityKey is required.");
+  }
+  if (payload.state !== "approved" && payload.state !== "rejected") {
+    throw new HttpError(400, "state must be approved or rejected.");
+  }
+
+  const build = await readBuildRecord(options.storageDir, buildId);
+  const report = await options.comparisonStore.getComparisonReport(buildId);
+  if (!report) {
+    throw new HttpError(404, "Comparison report not found.");
+  }
+  const comparison = report.comparisons.find((item) => item.identityKey === payload.identityKey);
+  if (!comparison) {
+    throw new HttpError(404, "Snapshot comparison not found for identityKey.");
+  }
+  if (comparison.status === "errored") {
+    throw new HttpError(400, "Capture errors are hard failures and cannot be approved or rejected as visual changes.");
+  }
+  if (!comparison.requiresApproval) {
+    throw new HttpError(400, "Snapshot comparison does not require visual review.");
+  }
+
+  const access = await resolveGitHubRepositoryAccess(req, build, options, payload);
+  if (!isReviewableRepositoryPermission(access.repositoryPermission)) {
+    throw new HttpError(403, "Approving or rejecting visual changes requires write, maintain, or admin repository permission.");
+  }
+
+  const previous = await options.reviewStore.getLatestReviewDecision({ buildId, identityKey: payload.identityKey });
+  const now = new Date().toISOString();
+  const decision: ReviewDecision = {
+    id: randomUUID(),
+    buildId,
+    identityKey: payload.identityKey,
+    state: payload.state,
+    user: {
+      provider: "github",
+      login: access.login,
+      id: access.id,
+      repositoryPermission: access.repositoryPermission as ReviewableRepositoryPermission,
+    },
+    previousState: previous?.state,
+    createdAt: now,
+  };
+  await options.reviewStore.saveReviewDecision(decision);
+  await options.reviewStore.saveAuditEvent({
+    id: randomUUID(),
+    repositoryFullName: build.repository.fullName,
+    actor: { provider: "github", login: access.login, id: access.id },
+    eventType: previous ? "review_decision.updated" : "review_decision.created",
+    subjectType: "snapshot",
+    subjectId: payload.identityKey,
+    buildId,
+    identityKey: payload.identityKey,
+    metadata: {
+      state: payload.state,
+      previousState: previous?.state,
+      storyId: comparison.story?.id,
+      modeName: comparison.mode?.name,
+      status: comparison.status,
+    },
+    createdAt: now,
+  });
+
+  const decisions = await options.reviewStore.listReviewDecisions({ buildId });
+  const reviewedReport = applyReviewDecisionsToReport(report, decisions);
+  const updatedBuild: StoredBuildRecord = {
+    ...build,
+    status: reviewedReport.checkConclusion === "failure" ? "failed" : "completed",
+    checkConclusion: strictCheckConclusionForReport(reviewedReport),
+    summary: reviewedReport.summary,
+  };
+  await writeJsonFile(buildRecordPath(options.storageDir, buildId), updatedBuild);
+  await publishGitHubCheckRun(updatedBuild, reviewedReport, options);
+  return decision;
+}
+
+async function resolveGitHubRepositoryAccess(
+  req: IncomingMessage,
+  build: StoredBuildRecord,
+  options: ApiServerOptions,
+  body?: ReviewDecisionFormFields,
+): Promise<ResolvedRepositoryAccess> {
+  const bodyUser = objectValue(body?.user);
+  const login =
+    stringHeader(req.headers["x-chroma-snap-github-login"]) ??
+    stringHeader(req.headers["x-github-login"]) ??
+    stringValue(body?.githubLogin) ??
+    stringValue(bodyUser.login);
+  const id = optionalNumber(stringHeader(req.headers["x-chroma-snap-github-user-id"]) ?? body?.githubUserId ?? bodyUser.id);
+  const headerPermission = stringHeader(req.headers["x-chroma-snap-repository-permission"]) ?? stringHeader(req.headers["x-github-repository-permission"]);
+  const bodyPermission = body?.repositoryPermission ?? (bodyUser.repositoryPermission as RepositoryPermission | undefined);
+
+  if (options.allowDevAuth || process.env.CHROMA_SNAP_DEV_AUTH === "1") {
+    return {
+      provider: "github",
+      login: login ?? "local-dev",
+      id,
+      repositoryPermission: (bodyPermission ?? headerPermission ?? "admin") as RepositoryPermission,
+    };
+  }
+
+  const auth = req.headers.authorization;
+  if (!auth?.startsWith("Bearer ")) {
+    throw new HttpError(401, "Review actions require a GitHub OAuth bearer token.");
+  }
+  if (!login) {
+    throw new HttpError(401, "Review actions require the authenticated GitHub login.");
+  }
+  if (!options.githubPermissionVerifier) {
+    throw new HttpError(501, "GitHub permission verification is not configured for review actions.");
+  }
+  const repositoryPermission = await options.githubPermissionVerifier.getRepositoryPermission({
+    repositoryFullName: build.repository.fullName,
+    login,
+    accessToken: auth.slice("Bearer ".length),
+    installationId: numberFromString(build.repository.installationId),
+  });
+  if (!repositoryPermission) {
+    throw new HttpError(403, "Authenticated GitHub user does not have repository access.");
+  }
+  return { provider: "github", login, id, repositoryPermission };
+}
+
+async function assertArtifactReadAccess(
+  req: IncomingMessage,
+  build: StoredBuildRecord,
+  options: ApiServerOptions,
+): Promise<void> {
+  if (options.allowDevAuth || process.env.CHROMA_SNAP_DEV_AUTH === "1") {
+    return;
+  }
+  await resolveGitHubRepositoryAccess(req, build, options);
+}
+
+async function sendSignedArtifact(
+  _req: IncomingMessage,
+  res: ServerResponse,
+  url: URL,
+  options: Required<Pick<ApiServerOptions, "artifactStore">> & ApiServerOptions,
+): Promise<void> {
+  const objectKey = url.searchParams.get("objectKey") ?? "";
+  const expiresAt = url.searchParams.get("expiresAt") ?? "";
+  const signature = url.searchParams.get("signature") ?? "";
+  const buildId = url.searchParams.get("buildId") ?? undefined;
+  const verification = verifyArtifactSignature({ objectKey, expiresAt, signature, buildId, secret: artifactSigningSecret(options) });
+  if (!verification.ok) {
+    throw new HttpError(401, verification.error ?? "Signed artifact URL is invalid.");
+  }
+  const bytes = await options.artifactStore.readArtifact(objectKey);
+  res.statusCode = 200;
+  res.setHeader("content-type", contentTypeForObjectKey(objectKey));
+  res.setHeader("cache-control", "private, max-age=60");
+  res.end(bytes);
+}
+
+function signedArtifactUrlsForReport(
+  report: ComparisonReport,
+  options: Required<Pick<ApiServerOptions, "publicUrl">> & ApiServerOptions,
+  buildId: string,
+): Record<string, { url: string; expiresAt: string }> {
+  const objectKeys = [...artifactObjectKeysForReport(report)];
+  if (objectKeys.length === 0) {
+    return {};
+  }
+  const expiresAt = new Date(Date.now() + signedArtifactTtlMs(options)).toISOString();
+  const secret = artifactSigningSecret(options);
+  return Object.fromEntries(
+    objectKeys.map((objectKey) => [
+      objectKey,
+      { url: createSignedArtifactUrl({ publicUrl: options.publicUrl, objectKey, buildId, expiresAt, secret }), expiresAt },
+    ]),
+  );
+}
+
+function artifactObjectKeysForReport(report: ComparisonReport): Set<string> {
+  const objectKeys = new Set<string>();
+  for (const comparison of report.comparisons) {
+    collectComparisonObjectKeys(comparison, objectKeys);
+  }
+  return objectKeys;
+}
+
+function collectComparisonObjectKeys(comparison: SnapshotComparison, objectKeys: Set<string>): void {
+  if (comparison.current?.image?.objectKey) {
+    objectKeys.add(comparison.current.image.objectKey);
+  }
+  if (comparison.current?.logs?.objectKey) {
+    objectKeys.add(comparison.current.logs.objectKey);
+  }
+  if (comparison.baseline?.objectKey) {
+    objectKeys.add(comparison.baseline.objectKey);
+  }
+  if (comparison.diff?.objectKey) {
+    objectKeys.add(comparison.diff.objectKey);
+  }
+}
+
+function artifactSigningSecret(options: ApiServerOptions): string {
+  const secret = options.artifactSigningSecret ?? process.env.CHROMA_SNAP_ARTIFACT_SIGNING_SECRET;
+  if (secret) {
+    return secret;
+  }
+  if (options.allowDevAuth || process.env.CHROMA_SNAP_DEV_AUTH === "1") {
+    return "chroma-snap-local-dev-artifact-signing-secret";
+  }
+  throw new HttpError(500, "CHROMA_SNAP_ARTIFACT_SIGNING_SECRET is required for signed artifact URLs.");
+}
+
+function signedArtifactTtlMs(options: ApiServerOptions): number {
+  return Math.max(1, options.signedArtifactUrlTtlSeconds ?? 300) * 1000;
+}
+
+function contentTypeForObjectKey(objectKey: string): string {
+  switch (extname(objectKey).toLowerCase()) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".txt":
+    case ".log":
+      return "text/plain; charset=utf-8";
+    default:
+      return "application/octet-stream";
+  }
 }
 
 async function handleGitHubWebhook(
@@ -698,6 +1072,37 @@ async function readBuildRecord(storageDir: string, buildId: string): Promise<Sto
     }
     throw error;
   }
+}
+
+async function readJsonOrForm<T>(req: IncomingMessage): Promise<T> {
+  if (!isFormRequest(req)) {
+    return readJson<T>(req);
+  }
+  const params = new URLSearchParams((await readBody(req)).toString("utf8"));
+  return Object.fromEntries(params.entries()) as T;
+}
+
+function isFormRequest(req: IncomingMessage): boolean {
+  return stringHeader(req.headers["content-type"])?.toLowerCase().startsWith("application/x-www-form-urlencoded") ?? false;
+}
+
+function parsePositiveInteger(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {

@@ -1,8 +1,8 @@
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { extname, resolve } from "node:path";
 import type { ComparisonReport } from "@chroma-snap/shared";
-import { renderReportHtml } from "./render.js";
+import { renderReportHtml, renderReportListHtml } from "./render.js";
 
 function contentTypeFor(path: string): string {
   switch (extname(path).toLowerCase()) {
@@ -24,6 +24,39 @@ export interface WebServerOptions {
   host?: string;
   port?: number;
   reportsDir?: string;
+}
+
+async function readLocalReports(reportsDir: string): Promise<ComparisonReport[]> {
+  const reports: ComparisonReport[] = [];
+  try {
+    reports.push(JSON.parse(await readFile(resolve(reportsDir, "comparison-report.json"), "utf8")) as ComparisonReport);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  try {
+    for (const entry of await readdir(reportsDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      try {
+        reports.push(JSON.parse(await readFile(resolve(reportsDir, entry.name, "comparison-report.json"), "utf8")) as ComparisonReport);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          throw error;
+        }
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const byBuildId = new Map(reports.map((report) => [report.buildId, report]));
+  return [...byBuildId.values()];
 }
 
 export async function startWebServer(options: WebServerOptions = {}): Promise<{ url: string; close: () => Promise<void> }> {
@@ -52,10 +85,23 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<{ 
         res.end(bytes);
         return;
       }
-      if (url.pathname === "/" || url.pathname === "/report") {
-        const report = JSON.parse(await readFile(resolve(reportsDir, "comparison-report.json"), "utf8")) as ComparisonReport;
+      if (url.pathname === "/" || url.pathname === "/reports") {
+        const reports = await readLocalReports(reportsDir);
         res.setHeader("content-type", "text/html; charset=utf-8");
-        res.end(renderReportHtml(report));
+        res.end(renderReportListHtml(reports));
+        return;
+      }
+      if (url.pathname === "/report") {
+        const reports = await readLocalReports(reportsDir);
+        const buildId = url.searchParams.get("buildId") ?? undefined;
+        const report = (buildId ? reports.find((item) => item.buildId === buildId) : reports[0]) ?? undefined;
+        if (!report) {
+          res.statusCode = 404;
+          res.end("Report not found");
+          return;
+        }
+        res.setHeader("content-type", "text/html; charset=utf-8");
+        res.end(renderReportHtml(report, { decisionEndpoint: process.env.CHROMA_SNAP_DECISION_ENDPOINT }));
         return;
       }
       res.statusCode = 404;
