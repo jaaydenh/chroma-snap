@@ -1,10 +1,14 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import {
   assertValidManifest,
+  createMetricEvent,
   emptySummary,
   FileBaselineStore,
+  metricJsonLine,
   sha256File,
+  summarizeManifestUsage,
   type ArtifactStore,
   type BaselineRecord,
   type BaselineStore,
@@ -13,6 +17,8 @@ import {
   type ComparisonReport,
   type ComparisonStatus,
   type ComparisonStore,
+  type MetricEvent,
+  type MetricSink,
   type ReviewDecision,
   type ReviewStore,
   type SnapshotComparison,
@@ -31,11 +37,13 @@ export interface ProcessManifestOptions {
   reconcileApprovedBaselines?: boolean;
   outputDir: string;
   seedBaselines?: boolean;
+  metricsSink?: MetricSink;
   now?: Date;
 }
 
 export async function processManifest(manifest: BuildManifest, options: ProcessManifestOptions): Promise<ComparisonReport> {
   assertValidManifest(manifest);
+  const started = performance.now();
   const now = options.now ?? new Date();
   const buildId = manifest.manifestId;
   const baseBranch = manifest.git.baseBranch ?? manifest.git.branch;
@@ -59,7 +67,33 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
 
   for (const snapshot of manifest.snapshots) {
     const baseline = baselinesByIdentityKey.get(snapshot.identityKey);
-    comparisons.push(await compareSnapshot(snapshot, baseline, manifest, manifestDir, options.outputDir, options.artifactStore));
+    try {
+      comparisons.push(await compareSnapshot(snapshot, baseline, manifest, manifestDir, options.outputDir, options.artifactStore));
+    } catch (error) {
+      const message = formatProcessorErrorMessage(error);
+      warnings.push(`Diff failed for ${snapshot.identityKey}: ${message}`);
+      comparisons.push({
+        identityKey: snapshot.identityKey,
+        status: "errored",
+        story: snapshot.story,
+        mode: snapshot.mode,
+        current: snapshot,
+        baseline,
+        requiresApproval: false,
+        message,
+      });
+      await emitWorkerMetric(options, createMetricEvent({
+        name: "worker.error",
+        value: 1,
+        labels: {
+          buildId,
+          repository: manifest.repository.fullName,
+          project: manifest.project.name,
+          identityKey: snapshot.identityKey,
+          phase: "diff",
+        },
+      }));
+    }
   }
 
   for (const baseline of branchBaselines) {
@@ -142,6 +176,26 @@ export async function processManifest(manifest: BuildManifest, options: ProcessM
   await mkdir(options.outputDir, { recursive: true });
   await writeFile(resolve(options.outputDir, "comparison-report.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
   await options.comparisonStore?.saveComparisonReport(report);
+  const usage = summarizeManifestUsage(manifest);
+  await emitWorkerMetric(options, createMetricEvent({
+    name: "worker.diff_completed",
+    value: Math.round((performance.now() - started) * 1000) / 1000,
+    unit: "milliseconds",
+    labels: {
+      buildId,
+      repository: manifest.repository.fullName,
+      project: manifest.project.name,
+      snapshotCount: usage.snapshotCount,
+      changed: summary.changed,
+      errored: summary.errored,
+      conclusion: report.checkConclusion,
+    },
+  }));
+  await emitWorkerMetric(options, createMetricEvent({
+    name: "worker.snapshots_diffed",
+    value: comparisons.length,
+    labels: { buildId, repository: manifest.repository.fullName, project: manifest.project.name },
+  }));
   return report;
 }
 
@@ -509,6 +563,28 @@ function getBaselineStore(options: ProcessManifestOptions): BaselineStore {
     return options.baselineStore;
   }
   return new FileBaselineStore(resolve(options.baselineFile ?? ".chroma-snap/baselines.json"));
+}
+
+function formatProcessorErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    const stack = error.stack ? `\n\nStack:\n${error.stack.split("\n").slice(0, 8).join("\n")}` : "";
+    return `Worker comparison failed: ${error.message}${stack}`;
+  }
+  return `Worker comparison failed: ${String(error)}`;
+}
+
+async function emitWorkerMetric(options: ProcessManifestOptions, event: MetricEvent): Promise<void> {
+  try {
+    if (options.metricsSink) {
+      await options.metricsSink(event);
+      return;
+    }
+    if (process.env.CHROMA_SNAP_METRICS_STDOUT === "1") {
+      console.log(metricJsonLine(event));
+    }
+  } catch {
+    // Metrics are best-effort and must not change visual gate results.
+  }
 }
 
 export function formatCaptureErrorMessage(snapshot: SnapshotManifestEntry): string {

@@ -1,19 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve } from "node:path";
+import { performance } from "node:perf_hooks";
 import {
   applyReviewDecisionsToReport,
   assertValidManifest,
+  assertWithinPrivateBetaLimits,
+  ChromaSnapError,
   checkOutputForComparisonReport,
   checkOutputForQueuedBuild,
+  createMetricEvent,
+  DEFAULT_PRIVATE_BETA_LIMITS,
+  DEFAULT_RETENTION_POLICY,
   createSignedArtifactUrl,
   DEFAULT_GITHUB_CHECK_NAME,
   FileArtifactStore,
   FileBaselineStore,
   FileComparisonStore,
   FileReviewStore,
+  errorCodeForHttpStatus,
+  evaluateBuildManifestLimits,
+  evaluateUploadSessionLimits,
   isReviewableRepositoryPermission,
+  metricJsonLine,
+  planRetentionSweep,
+  serializeChromaSnapError,
+  summarizeManifestUsage,
   strictCheckConclusionForReport,
   verifyArtifactSignature,
   type ArtifactStore,
@@ -33,7 +46,12 @@ import {
   type GitHubRefRecord,
   type GitHubRepositoryDescriptor,
   type GitHubWebhookEventRecord,
+  type MetricEvent,
+  type MetricSink,
+  type PrivateBetaLimits,
   type RepositoryPermission,
+  type RetentionCandidate,
+  type RetentionPolicy,
   type ReviewDecision,
   type ReviewDecisionRequest,
   type ReviewStore,
@@ -56,6 +74,16 @@ export interface GitHubPermissionVerifier {
   }): Promise<RepositoryPermission | undefined>;
 }
 
+export interface ApiRequestLogEvent {
+  kind: "request";
+  requestId: string;
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  timestamp: string;
+}
+
 export interface ApiServerOptions {
   host?: string;
   port?: number;
@@ -74,6 +102,12 @@ export interface ApiServerOptions {
   githubPermissionVerifier?: GitHubPermissionVerifier;
   artifactSigningSecret?: string;
   signedArtifactUrlTtlSeconds?: number;
+  adminSecret?: string;
+  privateBetaLimits?: PrivateBetaLimits | false;
+  retentionPolicy?: RetentionPolicy;
+  metricsSink?: MetricSink;
+  requestLogSink?: (event: ApiRequestLogEvent) => void | Promise<void>;
+  enableRequestLogging?: boolean;
   oidcAudience?: string;
 }
 
@@ -91,6 +125,8 @@ interface StoredBuildRecord {
   summary?: ComparisonReport["summary"];
 }
 
+type ApiRuntimeOptions = Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore" | "baselineStore" | "comparisonStore" | "reviewStore" | "githubStore">> & ApiServerOptions & { requestId?: string; serverStartedAt?: Date };
+
 export async function startApiServer(options: ApiServerOptions = {}): Promise<{ server: Server; url: string }> {
   const host = options.host ?? "127.0.0.1";
   const port = options.port ?? 4007;
@@ -100,15 +136,35 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
   const comparisonStore = options.comparisonStore ?? new FileComparisonStore(resolve(storageDir, "comparisons.json"));
   const reviewStore = options.reviewStore ?? new FileReviewStore(resolve(storageDir, "reviews.json"));
   const githubStore = options.githubStore ?? new FileGitHubIntegrationStore(storageDir);
+  const serverStartedAt = new Date();
   let publicUrl = options.publicUrl ?? `http://${host}:${port}`;
   await mkdir(storageDir, { recursive: true });
 
   const server = createServer(async (req, res) => {
+    const requestId = requestIdFor(req);
+    const requestStarted = performance.now();
+    res.setHeader("x-request-id", requestId);
     try {
-      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore, baselineStore, comparisonStore, reviewStore, githubStore });
+      await route(req, res, { ...options, host, port, storageDir, publicUrl, artifactStore, baselineStore, comparisonStore, reviewStore, githubStore, requestId, serverStartedAt });
     } catch (error) {
-      sendJson(res, error instanceof HttpError ? error.status : 500, {
-        error: error instanceof Error ? error.message : String(error),
+      const response = serializeChromaSnapError(error, requestId);
+      sendJson(res, response.status, response);
+    } finally {
+      const durationMs = Math.round((performance.now() - requestStarted) * 1000) / 1000;
+      await emitApiMetric(options, createMetricEvent({
+        name: "api.request",
+        value: durationMs,
+        unit: "milliseconds",
+        labels: { method: req.method ?? "", path: safeRequestPath(req, publicUrl), status: res.statusCode, requestId },
+      }));
+      await emitRequestLog(options, {
+        kind: "request",
+        requestId,
+        method: req.method ?? "",
+        path: safeRequestPath(req, publicUrl),
+        status: res.statusCode,
+        durationMs,
+        timestamp: new Date().toISOString(),
       });
     }
   });
@@ -123,12 +179,36 @@ export async function startApiServer(options: ApiServerOptions = {}): Promise<{ 
 async function route(
   req: IncomingMessage,
   res: ServerResponse,
-  options: Required<Pick<ApiServerOptions, "host" | "port" | "storageDir" | "publicUrl" | "artifactStore" | "baselineStore" | "comparisonStore" | "reviewStore" | "githubStore">> & ApiServerOptions,
+  options: ApiRuntimeOptions & { requestId: string; serverStartedAt: Date },
 ): Promise<void> {
   const url = new URL(req.url ?? "/", options.publicUrl);
 
-  if (req.method === "GET" && url.pathname === "/healthz") {
-    sendJson(res, 200, { ok: true });
+  if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+    sendJson(res, 200, healthResponse(options));
+    return;
+  }
+
+  if (req.method === "GET" && (url.pathname === "/ready" || url.pathname === "/readyz")) {
+    await stat(options.storageDir);
+    sendJson(res, 200, { ...healthResponse(options), ready: true });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/v1/admin/diagnostics") {
+    await assertAdminAccess(req, options);
+    sendJson(res, 200, await readDiagnostics(options));
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/v1/admin/cleanup") {
+    await assertAdminAccess(req, options);
+    const cleanup = await runRetentionCleanup(url, options);
+    await emitApiMetric(options, createMetricEvent({
+      name: "cleanup.completed",
+      value: cleanup.deleted.total,
+      labels: { dryRun: cleanup.dryRun, requestId: options.requestId },
+    }));
+    sendJson(res, 200, cleanup);
     return;
   }
 
@@ -394,9 +474,349 @@ async function route(
   throw new HttpError(404, "Not found");
 }
 
+interface AdminDiagnostics {
+  ok: true;
+  service: "chroma-snap-api";
+  storageDir: string;
+  startedAt?: string;
+  uptimeSeconds?: number;
+  counts: {
+    sessions: number;
+    builds: number;
+    queueJobs: number;
+    comparisonReports: number;
+    auditEvents: number;
+  };
+  storage: {
+    artifactBytes: number;
+  };
+}
+
+interface CleanupSummary {
+  scanned: number;
+  deleted: number;
+  protected: number;
+  freedBytes: number;
+}
+
+interface CleanupResult {
+  ok: true;
+  dryRun: boolean;
+  before?: string;
+  kinds: string[];
+  deleted: CleanupSummary & { total: number };
+  artifacts: CleanupSummary & { objectKeys: string[] };
+  uploadSessions: CleanupSummary & { sessionIds: string[] };
+  comparisons: CleanupSummary & { buildIds: string[] };
+  queueJobs: CleanupSummary & { jobIds: string[] };
+  warnings: string[];
+}
+
+function healthResponse(options: ApiRuntimeOptions): { ok: true; service: "chroma-snap-api"; startedAt?: string; uptimeSeconds?: number } {
+  const startedAt = options.serverStartedAt?.toISOString();
+  const uptimeSeconds = options.serverStartedAt ? Math.round((Date.now() - options.serverStartedAt.getTime()) / 1000) : undefined;
+  return { ok: true, service: "chroma-snap-api", startedAt, uptimeSeconds };
+}
+
+async function readDiagnostics(options: ApiRuntimeOptions): Promise<AdminDiagnostics> {
+  const [sessions, builds, queueJobs, reports, auditEvents, artifactBytes] = await Promise.all([
+    countJsonFiles(resolve(options.storageDir, "sessions")),
+    countDirectories(resolve(options.storageDir, "builds")),
+    countJsonFiles(resolve(options.storageDir, "queue")),
+    options.comparisonStore.listComparisonReports ? options.comparisonStore.listComparisonReports().then((items) => items.length) : Promise.resolve(0),
+    options.reviewStore.listAuditEvents({}).then((items) => items.length),
+    directoryByteSize(resolve(options.storageDir, "artifacts")),
+  ]);
+  return {
+    ...healthResponse(options),
+    storageDir: options.storageDir,
+    counts: { sessions, builds, queueJobs, comparisonReports: reports, auditEvents },
+    storage: { artifactBytes },
+  };
+}
+
+async function runRetentionCleanup(url: URL, options: ApiRuntimeOptions): Promise<CleanupResult> {
+  const dryRun = parseBoolean(url.searchParams.get("dryRun")) ?? false;
+  const before = parseOptionalDate(url.searchParams.get("before"));
+  const limit = parsePositiveInteger(url.searchParams.get("limit")) ?? 1_000;
+  const kinds = cleanupKinds(url);
+  const result = emptyCleanupResult(dryRun, before, [...kinds]);
+
+  if (kinds.has("artifact")) {
+    const artifactResult = await cleanupAbandonedUploadSessions({ options, dryRun, before, limit });
+    mergeCleanupSummary(result.artifacts, artifactResult.artifacts);
+    mergeCleanupSummary(result.uploadSessions, artifactResult.uploadSessions);
+    result.artifacts.objectKeys.push(...artifactResult.artifacts.objectKeys);
+    result.uploadSessions.sessionIds.push(...artifactResult.uploadSessions.sessionIds);
+    result.warnings.push(...artifactResult.warnings);
+  }
+
+  if (kinds.has("comparison")) {
+    const comparisonResult = await cleanupComparisonReports({ options, dryRun, before, limit });
+    mergeCleanupSummary(result.comparisons, comparisonResult.comparisons);
+    result.comparisons.buildIds.push(...comparisonResult.comparisons.buildIds);
+    result.warnings.push(...comparisonResult.warnings);
+  }
+
+  if (kinds.has("queue-job")) {
+    const queueResult = await cleanupQueueJobs({ options, dryRun, before, limit });
+    mergeCleanupSummary(result.queueJobs, queueResult.queueJobs);
+    result.queueJobs.jobIds.push(...queueResult.queueJobs.jobIds);
+    result.warnings.push(...queueResult.warnings);
+  }
+
+  result.deleted.scanned = result.artifacts.scanned + result.uploadSessions.scanned + result.comparisons.scanned + result.queueJobs.scanned;
+  result.deleted.deleted = result.artifacts.deleted + result.uploadSessions.deleted + result.comparisons.deleted + result.queueJobs.deleted;
+  result.deleted.protected = result.artifacts.protected + result.uploadSessions.protected + result.comparisons.protected + result.queueJobs.protected;
+  result.deleted.freedBytes = result.artifacts.freedBytes + result.uploadSessions.freedBytes + result.comparisons.freedBytes + result.queueJobs.freedBytes;
+  result.deleted.total = result.deleted.deleted;
+  return result;
+}
+
+async function cleanupAbandonedUploadSessions(input: { options: ApiRuntimeOptions; dryRun: boolean; before?: Date; limit: number }): Promise<Pick<CleanupResult, "artifacts" | "uploadSessions" | "warnings">> {
+  const artifacts = emptyArtifactCleanupSummary();
+  const uploadSessions = emptySessionCleanupSummary();
+  const warnings: string[] = [];
+  const sessionFiles = await listJsonFiles(resolve(input.options.storageDir, "sessions"));
+  const candidates: Array<RetentionCandidate & { session: StoredSession; path: string }> = [];
+  const now = input.before ?? new Date();
+
+  for (const path of sessionFiles) {
+    const session = await readJsonFile<StoredSession>(path);
+    const expiredByUploadWindow = Date.parse(session.expiresAt) < now.getTime();
+    const protectedSession = session.finalized || !expiredByUploadWindow;
+    candidates.push({ id: session.sessionId, kind: "artifact", createdAt: session.createdAt, protected: protectedSession, session, path });
+  }
+
+  const expired = expiredRetentionCandidates(candidates, input.options.retentionPolicy, input.before).slice(0, input.limit);
+  uploadSessions.scanned = candidates.length;
+  uploadSessions.protected = candidates.length - expired.length;
+
+  for (const candidate of expired) {
+    const uploadedKeys = candidate.session.artifacts.filter((artifact) => artifact.status === "uploaded").map((artifact) => artifact.objectKey);
+    for (const objectKey of uploadedKeys) {
+      const verification = await input.options.artifactStore.verifyArtifact(objectKey);
+      artifacts.scanned += 1;
+      if (verification.byteSize) {
+        artifacts.freedBytes += verification.byteSize;
+      }
+    }
+    if (!input.dryRun) {
+      await input.options.artifactStore.deleteArtifacts(uploadedKeys);
+      await rm(candidate.path, { force: true });
+    }
+    artifacts.deleted += uploadedKeys.length;
+    artifacts.objectKeys.push(...uploadedKeys);
+    uploadSessions.deleted += 1;
+    uploadSessions.sessionIds.push(candidate.session.sessionId);
+  }
+
+  return { artifacts, uploadSessions, warnings };
+}
+
+async function cleanupComparisonReports(input: { options: ApiRuntimeOptions; dryRun: boolean; before?: Date; limit: number }): Promise<Pick<CleanupResult, "comparisons" | "warnings">> {
+  const comparisons = emptyComparisonCleanupSummary();
+  const warnings: string[] = [];
+  if (!input.options.comparisonStore.listComparisonReports) {
+    warnings.push("Comparison cleanup skipped because the configured comparison store cannot list reports.");
+    return { comparisons, warnings };
+  }
+  const reports = await input.options.comparisonStore.listComparisonReports();
+  const candidates = reports.map((report): RetentionCandidate & { buildId: string } => ({
+    id: report.buildId,
+    buildId: report.buildId,
+    kind: "comparison",
+    createdAt: report.generatedAt,
+  }));
+  const expired = expiredRetentionCandidates(candidates, input.options.retentionPolicy, input.before).slice(0, input.limit);
+  comparisons.scanned = candidates.length;
+  comparisons.protected = candidates.length - expired.length;
+  comparisons.deleted = expired.length;
+  comparisons.buildIds.push(...expired.map((candidate) => candidate.buildId));
+  if (expired.length > 0 && !input.dryRun) {
+    if (!input.options.comparisonStore.deleteComparisonReports) {
+      warnings.push("Comparison cleanup planned expired reports, but the configured comparison store cannot delete reports.");
+      comparisons.deleted = 0;
+      comparisons.protected = candidates.length;
+    } else {
+      await input.options.comparisonStore.deleteComparisonReports(expired.map((candidate) => candidate.buildId));
+    }
+  }
+  return { comparisons, warnings };
+}
+
+async function cleanupQueueJobs(input: { options: ApiRuntimeOptions; dryRun: boolean; before?: Date; limit: number }): Promise<Pick<CleanupResult, "queueJobs" | "warnings">> {
+  const queueJobs = emptyQueueCleanupSummary();
+  const warnings: string[] = [];
+  const queueFiles = await listJsonFiles(resolve(input.options.storageDir, "queue"));
+  const candidates: Array<RetentionCandidate & { path: string; jobId: string }> = [];
+  for (const path of queueFiles) {
+    const job = await readJsonFile<{ id: string; status?: string; createdAt: string; processedAt?: string }>(path);
+    candidates.push({
+      id: job.id,
+      jobId: job.id,
+      path,
+      kind: "queue-job",
+      createdAt: job.processedAt ?? job.createdAt,
+      protected: job.status !== "completed" && job.status !== "failed",
+    });
+  }
+  const expired = expiredRetentionCandidates(candidates, input.options.retentionPolicy, input.before).slice(0, input.limit);
+  queueJobs.scanned = candidates.length;
+  queueJobs.protected = candidates.length - expired.length;
+  queueJobs.deleted = expired.length;
+  queueJobs.jobIds.push(...expired.map((candidate) => candidate.jobId));
+  if (!input.dryRun) {
+    await Promise.all(expired.map((candidate) => rm(candidate.path, { force: true })));
+  }
+  return { queueJobs, warnings };
+}
+
+function emptyCleanupResult(dryRun: boolean, before: Date | undefined, kinds: string[]): CleanupResult {
+  return {
+    ok: true,
+    dryRun,
+    before: before?.toISOString(),
+    kinds,
+    deleted: { ...emptySummaryCleanup(), total: 0 },
+    artifacts: emptyArtifactCleanupSummary(),
+    uploadSessions: emptySessionCleanupSummary(),
+    comparisons: emptyComparisonCleanupSummary(),
+    queueJobs: emptyQueueCleanupSummary(),
+    warnings: [],
+  };
+}
+
+function emptySummaryCleanup(): CleanupSummary {
+  return { scanned: 0, deleted: 0, protected: 0, freedBytes: 0 };
+}
+
+function emptyArtifactCleanupSummary(): CleanupSummary & { objectKeys: string[] } {
+  return { ...emptySummaryCleanup(), objectKeys: [] };
+}
+
+function emptySessionCleanupSummary(): CleanupSummary & { sessionIds: string[] } {
+  return { ...emptySummaryCleanup(), sessionIds: [] };
+}
+
+function emptyComparisonCleanupSummary(): CleanupSummary & { buildIds: string[] } {
+  return { ...emptySummaryCleanup(), buildIds: [] };
+}
+
+function emptyQueueCleanupSummary(): CleanupSummary & { jobIds: string[] } {
+  return { ...emptySummaryCleanup(), jobIds: [] };
+}
+
+function mergeCleanupSummary(target: CleanupSummary, source: CleanupSummary): void {
+  target.scanned += source.scanned;
+  target.deleted += source.deleted;
+  target.protected += source.protected;
+  target.freedBytes += source.freedBytes;
+}
+
+function cleanupKinds(url: URL): Set<"artifact" | "comparison" | "queue-job"> {
+  const rawKinds = url.searchParams.getAll("kind").flatMap((value) => value.split(",").map((item) => item.trim()).filter(Boolean));
+  const kinds = rawKinds.length === 0 ? ["artifact", "comparison", "queue-job"] : rawKinds;
+  const allowed = new Set(["artifact", "comparison", "queue-job"] as const);
+  for (const kind of kinds) {
+    if (!allowed.has(kind as "artifact" | "comparison" | "queue-job")) {
+      throw new HttpError(400, `Unsupported cleanup kind '${kind}'.`);
+    }
+  }
+  return new Set(kinds as Array<"artifact" | "comparison" | "queue-job">);
+}
+
+function expiredRetentionCandidates<T extends RetentionCandidate>(candidates: T[], policy: RetentionPolicy | undefined, before: Date | undefined): T[] {
+  if (before) {
+    return candidates.filter((candidate) => !candidate.protected && Date.parse(candidate.createdAt) < before.getTime());
+  }
+  const expired = new Set(planRetentionSweep(candidates, policy ?? DEFAULT_RETENTION_POLICY).expired.map((candidate) => candidate.id));
+  return candidates.filter((candidate) => expired.has(candidate.id));
+}
+
+function privateBetaLimits(options: ApiServerOptions): PrivateBetaLimits {
+  if (options.privateBetaLimits === false) {
+    return {};
+  }
+  return { ...DEFAULT_PRIVATE_BETA_LIMITS, ...(options.privateBetaLimits ?? {}) };
+}
+
+function enforcePrivateBetaLimits(violations: ReturnType<typeof evaluateUploadSessionLimits> | ReturnType<typeof evaluateBuildManifestLimits>): void {
+  assertWithinPrivateBetaLimits(violations);
+}
+
+async function assertAdminAccess(req: IncomingMessage, options: ApiServerOptions): Promise<void> {
+  if (options.allowDevAuth || process.env.CHROMA_SNAP_DEV_AUTH === "1") {
+    return;
+  }
+  const expected = options.adminSecret ?? process.env.CHROMA_SNAP_ADMIN_SECRET;
+  if (!expected) {
+    throw new HttpError(501, "Admin endpoints require CHROMA_SNAP_ADMIN_SECRET outside development auth.");
+  }
+  const bearer = req.headers.authorization?.startsWith("Bearer ") ? req.headers.authorization.slice("Bearer ".length) : undefined;
+  const actual = stringHeader(req.headers["x-chroma-snap-admin-secret"]) ?? bearer;
+  if (actual !== expected) {
+    throw new HttpError(403, "Admin endpoint access denied.");
+  }
+}
+
+async function countJsonFiles(dir: string): Promise<number> {
+  return (await listJsonFiles(dir)).length;
+}
+
+async function countDirectories(dir: string): Promise<number> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isDirectory()).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+}
+
+async function listJsonFiles(dir: string): Promise<string[]> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    return entries.filter((entry) => entry.isFile() && entry.name.endsWith(".json")).map((entry) => resolve(dir, entry.name));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function directoryByteSize(dir: string): Promise<number> {
+  try {
+    const entries = await readdir(dir, { withFileTypes: true });
+    const sizes = await Promise.all(entries.map(async (entry) => {
+      const path = resolve(dir, entry.name);
+      if (entry.isDirectory()) {
+        return directoryByteSize(path);
+      }
+      if (entry.isFile()) {
+        return (await stat(path)).size;
+      }
+      return 0;
+    }));
+    return sizes.reduce((sum, size) => sum + size, 0);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return 0;
+    }
+    throw error;
+  }
+}
+
 async function createUploadSession(body: CreateUploadSessionRequest, options: Required<Pick<ApiServerOptions, "storageDir" | "publicUrl">> & ApiServerOptions): Promise<UploadSessionResponse> {
   if (!body.repository?.fullName || !body.git?.commitSha || !body.configHash) {
     throw new HttpError(400, "repository.fullName, git.commitSha, and configHash are required.");
+  }
+
+  if (options.privateBetaLimits !== false) {
+    enforcePrivateBetaLimits(evaluateUploadSessionLimits(body, privateBetaLimits(options)));
   }
 
   const sessionId = randomUUID();
@@ -417,6 +837,21 @@ async function createUploadSession(body: CreateUploadSessionRequest, options: Re
   };
 
   await writeJsonFile(sessionPath(options.storageDir, sessionId), session);
+  await emitApiMetric(options, createMetricEvent({
+    name: "upload_session.created",
+    value: 1,
+    labels: {
+      repository: body.repository.fullName,
+      project: body.project.name,
+      artifactCount: session.artifacts.length,
+    },
+  }));
+  await emitApiMetric(options, createMetricEvent({
+    name: "upload_session.declared_artifact_bytes",
+    value: session.artifacts.reduce((sum, artifact) => sum + (artifact.byteSize ?? 0), 0),
+    unit: "bytes",
+    labels: { repository: body.repository.fullName, project: body.project.name },
+  }));
   return {
     sessionId,
     buildId,
@@ -465,6 +900,10 @@ async function finalizeUploadSession(
   }
 
   assertValidManifest(body.manifest);
+  if (options.privateBetaLimits !== false) {
+    enforcePrivateBetaLimits(evaluateBuildManifestLimits(body.manifest, privateBetaLimits(options)));
+  }
+
   if (body.manifest.repository.fullName !== session.request.repository.fullName) {
     throw new HttpError(400, "Manifest repository does not match upload session.");
   }
@@ -506,6 +945,26 @@ async function finalizeUploadSession(
 
   session.finalized = true;
   await writeJsonFile(sessionPath(options.storageDir, sessionId), session);
+
+  const usage = summarizeManifestUsage(body.manifest);
+  await emitApiMetric(options, createMetricEvent({
+    name: "build.finalized",
+    value: 1,
+    labels: {
+      repository: body.manifest.repository.fullName,
+      project: body.manifest.project.name,
+      branch: body.manifest.git.branch,
+      snapshotCount: usage.snapshotCount,
+      capturedSnapshotCount: usage.capturedSnapshotCount,
+      erroredSnapshotCount: usage.erroredSnapshotCount,
+    },
+  }));
+  await emitApiMetric(options, createMetricEvent({
+    name: "build.snapshot_artifact_bytes",
+    value: usage.artifactBytes,
+    unit: "bytes",
+    labels: { repository: body.manifest.repository.fullName, project: body.manifest.project.name },
+  }));
 
   return { buildId: session.buildId, status: "queued", reportUrl: `${options.publicUrl}/v1/builds/${session.buildId}/review` };
 }
@@ -1066,6 +1525,70 @@ function isDefined<T>(value: T | undefined): value is T {
   return value !== undefined;
 }
 
+function parseBoolean(value: string | null): boolean | undefined {
+  if (value === null || value === "") {
+    return undefined;
+  }
+  if (value === "1" || value.toLowerCase() === "true") {
+    return true;
+  }
+  if (value === "0" || value.toLowerCase() === "false") {
+    return false;
+  }
+  throw new HttpError(400, `Invalid boolean query value '${value}'.`);
+}
+
+function parseOptionalDate(value: string | null): Date | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) {
+    throw new HttpError(400, `Invalid date query value '${value}'.`);
+  }
+  return date;
+}
+
+function requestIdFor(req: IncomingMessage): string {
+  return stringHeader(req.headers["x-request-id"]) ?? randomUUID();
+}
+
+function safeRequestPath(req: IncomingMessage, publicUrl: string): string {
+  try {
+    return new URL(req.url ?? "/", publicUrl).pathname;
+  } catch {
+    return req.url ?? "/";
+  }
+}
+
+async function emitApiMetric(options: ApiServerOptions, event: MetricEvent): Promise<void> {
+  try {
+    if (options.metricsSink) {
+      await options.metricsSink(event);
+      return;
+    }
+    if (process.env.CHROMA_SNAP_METRICS_STDOUT === "1") {
+      console.log(metricJsonLine(event));
+    }
+  } catch {
+    // Metrics are intentionally best-effort so observability failures do not block uploads.
+  }
+}
+
+async function emitRequestLog(options: ApiServerOptions, event: ApiRequestLogEvent): Promise<void> {
+  try {
+    if (options.requestLogSink) {
+      await options.requestLogSink(event);
+      return;
+    }
+    if (options.enableRequestLogging || process.env.CHROMA_SNAP_REQUEST_LOGS === "1") {
+      console.log(JSON.stringify(event));
+    }
+  } catch {
+    // Request logging is best-effort.
+  }
+}
+
 async function assertUploadAuth(req: IncomingMessage, options: ApiServerOptions): Promise<void> {
   if (options.allowDevAuth || process.env.CHROMA_SNAP_DEV_AUTH === "1") {
     return;
@@ -1145,7 +1668,14 @@ function optionalNumber(value: unknown): number | undefined {
 }
 
 async function readJson<T>(req: IncomingMessage): Promise<T> {
-  return JSON.parse((await readBody(req)).toString("utf8")) as T;
+  try {
+    return JSON.parse((await readBody(req)).toString("utf8")) as T;
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      throw new HttpError(400, "Invalid JSON request body.");
+    }
+    throw error;
+  }
 }
 
 async function readBody(req: IncomingMessage): Promise<Buffer> {
@@ -1173,8 +1703,8 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
   res.end(`${JSON.stringify(body, null, 2)}\n`);
 }
 
-class HttpError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
+class HttpError extends ChromaSnapError {
+  constructor(status: number, message: string, details?: Record<string, unknown>) {
+    super({ status, message, code: errorCodeForHttpStatus(status), details });
   }
 }

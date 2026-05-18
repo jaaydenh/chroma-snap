@@ -12,6 +12,7 @@ export interface ComparisonStore {
   saveComparisonReport(report: ComparisonReport): Promise<void>;
   getComparisonReport(buildId: string): Promise<ComparisonReport | undefined>;
   listComparisonReports?(input?: ComparisonReportListInput): Promise<ComparisonReport[]>;
+  deleteComparisonReports?(buildIds: string[]): Promise<void>;
 }
 
 export interface ComparisonStoreDocument {
@@ -39,6 +40,20 @@ export class FileComparisonStore implements ComparisonStore {
     const store = await this.readStore();
     const reports = Object.values(store.reports).sort((a, b) => Date.parse(a.generatedAt) - Date.parse(b.generatedAt));
     return input.limit === undefined ? reports : reports.slice(-Math.max(0, input.limit));
+  }
+
+  async deleteComparisonReports(buildIds: string[]): Promise<void> {
+    if (buildIds.length === 0) {
+      return;
+    }
+    const ids = new Set(buildIds);
+    await withFileStoreLock(this.path, async () => {
+      const store = await this.readStore();
+      for (const buildId of ids) {
+        delete store.reports[buildId];
+      }
+      await this.writeStore(store);
+    });
   }
 
   async listSnapshotComparisons(buildId: string): Promise<SnapshotComparison[]> {

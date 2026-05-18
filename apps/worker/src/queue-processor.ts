@@ -93,6 +93,44 @@ export class QueueJobProcessor {
   }
 }
 
+export interface CleanupQueueJobPayload {
+  serviceUrl: string;
+  adminSecret?: string;
+  kind?: "artifact" | "comparison" | "queue-job";
+  before?: string;
+  limit?: number;
+  dryRun?: boolean;
+}
+
+export function createCleanupJobHandler(fetchImpl: typeof fetch = fetch): QueueJobHandler {
+  return async (job) => {
+    const payload = JSON.parse(job.payloadJson) as CleanupQueueJobPayload;
+    if (!payload.serviceUrl) {
+      throw new Error("Cleanup queue job payload requires serviceUrl.");
+    }
+    const params = new URLSearchParams();
+    if (payload.kind) {
+      params.set("kind", payload.kind);
+    }
+    if (payload.before) {
+      params.set("before", payload.before);
+    }
+    if (payload.limit !== undefined) {
+      params.set("limit", String(payload.limit));
+    }
+    if (payload.dryRun !== undefined) {
+      params.set("dryRun", String(payload.dryRun));
+    }
+    const response = await fetchImpl(`${payload.serviceUrl.replace(/\/$/, "")}/v1/admin/cleanup${params.size ? `?${params}` : ""}`, {
+      method: "POST",
+      headers: payload.adminSecret ? { "x-chroma-snap-admin-secret": payload.adminSecret } : undefined,
+    });
+    if (!response.ok) {
+      throw new Error(`Cleanup job failed with ${response.status}: ${await response.text()}`);
+    }
+  };
+}
+
 export function retryDelayMs(attempts: number, baseBackoffMs = 1_000): number {
   return baseBackoffMs * 2 ** Math.max(0, attempts - 1);
 }

@@ -15,6 +15,9 @@ repositories
   │    └─ queue_jobs
   ├─ baselines
   ├─ check_runs
+  ├─ usage_events
+  ├─ cleanup_runs
+  ├─ private_beta_limits
   ├─ github_installations
   ├─ webhook_events
   ├─ pull_request_metadata
@@ -37,6 +40,9 @@ repositories
 - **pull_request_metadata** and **github_refs**: PR/base branch metadata captured from GitHub webhooks.
 - **review_decisions**: approval/rejection records created by authorized GitHub users.
 - **audit_events**: append-only operational and user-action audit trail.
+- **usage_events**: metric events for private-beta usage, cost, and reliability analysis.
+- **private_beta_limits**: future per-repository overrides for upload, artifact, and snapshot caps.
+- **cleanup_runs**: audit records for retention sweeps and freed-byte accounting.
 - **queue_jobs**: durable async work for diffing, check updates, cleanup, and baseline promotion.
 
 ## Invariants
@@ -71,7 +77,7 @@ The local API stores records under `.chroma-snap/server`:
   reviews.json
 ```
 
-Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts. Milestone 5 adds a file-backed review store for decisions and audit events, plus HMAC-signed artifact URL helpers for private local artifact reads. Milestone 6 records baseline promotion context and uses prior reports plus review decisions to promote approved snapshots or retire approved deletions only after base-branch confirmation.
+Milestone 3 adds file-backed baseline and comparison stores that mirror the PostgreSQL model closely enough for local worker processing and API tests. Queue records now carry `status`, `attempts`, `lastError`, and `nextRetryAt` fields so worker retries can be idempotent before a durable queue adapter exists. Milestone 4 adds file-backed GitHub App webhook, PR/base metadata, and Check Run stores with matching PostgreSQL migration contracts. Milestone 5 adds a file-backed review store for decisions and audit events, plus HMAC-signed artifact URL helpers for private local artifact reads. Milestone 6 records baseline promotion context and uses prior reports plus review decisions to promote approved snapshots or retire approved deletions only after base-branch confirmation. Milestone 7 adds health/readiness diagnostics, JSON-line usage metrics, private-beta limit enforcement, and local retention cleanup for abandoned upload artifacts, expired comparison reports, and terminal queue jobs.
 
 ## Deferred production work
 
