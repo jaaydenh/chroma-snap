@@ -1,70 +1,60 @@
 # Chroma Snap
 
-Chroma Snap is an Apache-2.0, open-source codebase for a hosted-first visual regression gate for Storybook 10/Vite projects. The v1 product shape is intentionally narrow: GitHub Actions + GitHub App, Chromium-only Storybook screenshots, server-side diffing, hosted review, strict GitHub Checks, private artifacts, approvals, auditability, and base-branch baseline promotion.
+Chroma Snap is an Apache-2.0 visual regression gate for Storybook 10/Vite projects. It captures Chromium screenshots in CI, uploads private artifacts, diffs them against accepted base-branch baselines, shows a hosted review UI, and keeps GitHub Checks strict until changes are clean or approved.
 
-This repository now implements the Milestone 0 through Milestone 7 private-beta MVP slice of that plan:
+**Status:** private-beta MVP. The repository contains the full open-source code for the CLI, GitHub Action wrapper, Storybook/Vitest capture adapter, API, worker, review UI, migrations, and deployment notes. The supported v1 path is hosted-first. Production-grade self-hosting still needs the deferred PostgreSQL, S3, durable queue, OAuth, and OIDC hardening called out below.
 
-- Shared typed config, manifest, upload, baseline, diff, and review protocol models.
-- A Storybook 10/Vite Vitest browser-mode capture adapter with an automatic `afterEach` screenshot hook.
-- A CLI that initializes config, runs capture commands, normalizes capture events into manifests, and uploads to an API.
-- A local API skeleton for upload sessions, scoped artifact PUTs, manifest finalization, queue records, baseline lookup, comparison report persistence, GitHub webhooks, strict Checks records, review decisions, audit events, signed artifact URLs, health/readiness probes, diagnostics, private-beta limits, cleanup, and structured metrics hooks.
-- A worker that performs server-side PNG diffs, classifies new/changed/deleted/errored/unchanged snapshots, persists comparison reports, handles retry metadata, records comparison failures without aborting whole builds, seeds local baselines, emits metrics, and reconciles approved PR snapshots after base-branch confirmation.
-- A hosted-review HTML renderer/server with a report list, image viewer, approval/rejection forms, decision state, and audit trail display.
-- A GitHub Action wrapper and example workflow.
+## What is included
 
-The code is open from day one, but production-grade self-hosting is not claimed yet. The local API uses file-backed storage plus development auth/storage seams so the core protocol can be exercised before PostgreSQL adapters, S3 adapters, durable queues, production OAuth/OIDC verification, and supported self-hosting are added.
+- Storybook 10/Vite + Vitest browser-mode capture adapter for Chromium.
+- `visual.config.ts` config with named modes, viewport/globals, masks, and thresholds.
+- CLI commands for init, capture, upload, and Vitest setup generation.
+- Upload sessions, private artifact storage seams, manifest validation, and strict build metadata.
+- Server-side PNG diffing, baseline seeding, deleted/new/changed/errored classifications, and approved baseline promotion.
+- GitHub App webhook/check-run seams, review decisions, permission gates, audit events, signed artifact URLs, and private-beta cleanup/metrics hooks.
+- Static local review UI plus docs for hosted review and future self-hosting.
 
-## Monorepo layout
+## Repository layout
 
 ```text
-packages/shared                  Config, manifest, upload, review, hashing types
-packages/capture-storybook-vitest Storybook 10/Vite Vitest browser capture adapter
-packages/capture-fixture         Lightweight fixture adapter for repeatable local validation
-packages/cli                     Local and CI command runner
-packages/action                  GitHub Action wrapper around the CLI
-apps/api                         Upload-session API and GitHub/review service seams
-apps/worker                      Diff worker and local baseline processor
-apps/web                         Static review report renderer/server
-infra                            Hosted deployment and future self-hosting notes
-docs                             Protocol and milestone notes
-examples                         Example visual config and private-beta workflow
+packages/shared                   Config, manifest, upload, review, hashing types
+packages/capture-storybook-vitest Experimental Storybook 10/Vite Vitest browser capture adapter
+packages/capture-fixture          Lightweight fixture adapter for repeatable local validation
+packages/cli                      Local and CI command runner
+packages/action                   GitHub Action wrapper around the CLI
+apps/api                          Upload-session API and GitHub/review service seams
+apps/worker                       Diff worker and local baseline processor
+apps/web                          Static review report renderer/server
+infra                             Hosted deployment and future self-hosting notes
+docs                              Protocol, workflow, and milestone notes
+examples                          Example visual config and private-beta workflow
 ```
 
-## Install and run locally
+## Prerequisites
 
-These steps run the current file-backed private-beta MVP from source. They do not require PostgreSQL, S3, Redis, or a GitHub App.
+- Node.js 22 or newer.
+- npm and Git.
+- For real capture: Storybook 10 with Vite, Vitest browser mode, and Playwright Chromium.
+- For hosted/CI review: a GitHub repository, GitHub Actions, and a GitHub App installation.
 
-### Prerequisites
+## Quick start from this repository
 
-1. Install Node.js 22 or newer.
-2. Install npm and Git.
-3. For real Storybook capture, use a Storybook 10/Vite project with Vitest browser mode and Playwright Chromium configured. The fixture smoke test below does not require Storybook.
-
-### 1. Install dependencies and build everything
+This runs the file-backed local MVP. It does not require PostgreSQL, S3, Redis, or a GitHub App.
 
 ```bash
-git clone git@github.com:jaaydenh/chroma-snap.git
-cd chroma-snap
 npm install
 npm run build
-```
-
-Run the full validation suite:
-
-```bash
 npm test
 npm run test:fixture-capture
 ```
 
-`npm run test:fixture-capture` writes a local fixture manifest at:
+The fixture command writes a sample manifest to:
 
 ```text
 .chroma-snap/dogfood/capture/manifest.json
 ```
 
-### 2. Start the local API
-
-Open a terminal for the API:
+Start the local API:
 
 ```bash
 CHROMA_SNAP_DEV_AUTH=1 \
@@ -73,31 +63,19 @@ CHROMA_SNAP_REQUEST_LOGS=1 \
 node apps/api/dist/index.js
 ```
 
-The API listens on `http://127.0.0.1:4007` by default. Check it from another terminal:
+In another terminal, verify and upload the fixture run:
 
 ```bash
 curl -fsS http://127.0.0.1:4007/health
 curl -fsS http://127.0.0.1:4007/ready
-```
 
-Local API state is written under `.chroma-snap/server` unless `CHROMA_SNAP_STORAGE_DIR` is set.
-
-### 3. Upload a captured manifest to the API
-
-After `npm run test:fixture-capture`, upload the fixture manifest and screenshots:
-
-```bash
 CHROMA_SNAP_DEV_AUTH=1 \
 node packages/cli/dist/index.js upload \
   --manifest .chroma-snap/dogfood/capture/manifest.json \
   --service-url http://127.0.0.1:4007
 ```
 
-The API creates an upload session, verifies artifact hashes and sizes, stores private artifacts locally, writes a build record, and queues a `diff-build` job record.
-
-### 4. Process screenshots and seed local baselines
-
-Run the worker manually for the local file-backed flow:
+Process the manifest and seed local baselines:
 
 ```bash
 node apps/worker/dist/index.js \
@@ -107,61 +85,30 @@ node apps/worker/dist/index.js \
   --seed-baselines
 ```
 
-This writes:
-
-```text
-.chroma-snap/dogfood/report/comparison-report.json
-```
-
-For a later PR or feature-branch style run, omit `--seed-baselines` so screenshots are compared against the accepted base-branch baselines. To reconcile approved PR changes after they land on the base branch, use:
-
-```bash
-node apps/worker/dist/index.js \
-  --manifest .chroma-snap/dogfood/capture/manifest.json \
-  --baseline-file .chroma-snap/dogfood/baselines.json \
-  --comparison-file .chroma-snap/dogfood/comparisons.json \
-  --review-file .chroma-snap/dogfood/reviews.json \
-  --output-dir .chroma-snap/dogfood/report \
-  --reconcile-approved
-```
-
-### 5. Serve the review UI
-
-Open a terminal for the review UI:
+Serve the local review UI:
 
 ```bash
 CHROMA_SNAP_REPORT_DIR=.chroma-snap/dogfood/report \
 node apps/web/dist/index.js
 ```
 
-Open `http://127.0.0.1:4008` to see the report list and visual review page. The static local UI reads comparison reports from `CHROMA_SNAP_REPORT_DIR`. Hosted review decision forms are wired through the API in the hosted path.
+Open `http://127.0.0.1:4008`.
 
-### 6. Use diagnostics and cleanup during local testing
+## Add Chroma Snap to a Storybook project
 
-With `CHROMA_SNAP_DEV_AUTH=1`, admin endpoints are open for local development:
-
-```bash
-curl -fsS http://127.0.0.1:4007/v1/admin/diagnostics
-curl -fsS -X POST "http://127.0.0.1:4007/v1/admin/cleanup?kind=artifact,comparison,queue-job&dryRun=true"
-```
-
-Outside development auth, set `CHROMA_SNAP_ADMIN_SECRET` on the API and send it with either `x-chroma-snap-admin-secret` or `Authorization: Bearer`.
-
-## Run against a Storybook 10/Vite project
-
-Use this flow in a separate Storybook 10/Vite repository once the packages are published or linked locally. From this repository, replace `npx chroma-snap` with `node /path/to/chroma-snap/packages/cli/dist/index.js`.
-
-### 1. Install or link the Chroma Snap packages
-
-When packages are published, install them in the Storybook repository:
+Install the packages when they are published:
 
 ```bash
 npm install --save-dev @chroma-snap/cli @chroma-snap/shared @chroma-snap/capture-storybook-vitest
 ```
 
-During local source development, build this repository first and use `node /path/to/chroma-snap/packages/cli/dist/index.js` anywhere this guide says `npx chroma-snap`.
+During source development, build this repository and replace `npx chroma-snap` with:
 
-### 2. Add Chroma Snap config and setup files
+```bash
+node /path/to/chroma-snap/packages/cli/dist/index.js
+```
+
+Initialize a Storybook 10/Vite repository:
 
 ```bash
 npx chroma-snap init
@@ -175,7 +122,7 @@ visual.config.ts
 .github/workflows/chroma-snap.yml
 ```
 
-Ensure the generated `.storybook/chroma-snap.vitest.setup.ts` is included in the Storybook Vitest browser-mode setup files, and ensure `visual.config.ts` points at the Storybook Vitest project command, for example:
+Ensure `.storybook/chroma-snap.vitest.setup.ts` is listed in your Storybook Vitest setup files. Then adjust `visual.config.ts` for your project:
 
 ```ts
 import { defineConfig } from "@chroma-snap/shared";
@@ -189,35 +136,32 @@ export default defineConfig({
   },
   modes: [
     { name: "default", viewport: { width: 1280, height: 720 }, colorScheme: "light" },
-    { name: "mobile-dark", viewport: { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true }, colorScheme: "dark", globals: { theme: "dark" } },
+    {
+      name: "mobile-dark",
+      viewport: { width: 390, height: 844, deviceScaleFactor: 2, isMobile: true },
+      colorScheme: "dark",
+      globals: { theme: "dark" },
+    },
   ],
   thresholds: { maxDiffPixels: 100, maxDiffPixelRatio: 0.001 },
   masks: [{ selector: "[data-visual-mask]", reason: "dynamic content" }],
 });
 ```
 
-### 3. Capture locally
+Capture locally:
 
 ```bash
 npx chroma-snap capture --config visual.config.ts
 ```
 
-This runs the configured Storybook Vitest browser-mode command once per named mode and writes:
+The capture command writes:
 
 ```text
 .chroma-snap/capture/capture-events.jsonl
 .chroma-snap/capture/manifest.json
 ```
 
-If you already have adapter events and only want to rebuild the manifest, use:
-
-```bash
-npx chroma-snap capture --config visual.config.ts --no-run
-```
-
-### 4. Upload locally or to the hosted service
-
-For local development:
+Upload to a local API:
 
 ```bash
 CHROMA_SNAP_DEV_AUTH=1 \
@@ -226,11 +170,9 @@ npx chroma-snap upload \
   --service-url http://127.0.0.1:4007
 ```
 
-For hosted GitHub Actions, the action requests a GitHub Actions OIDC token and sends it to the service. The local MVP still documents production OIDC signature verification as deferred work.
+## GitHub Actions setup
 
-### 5. Add the GitHub Actions workflow
-
-The generated workflow is the starting point. A minimal hosted workflow looks like:
+A minimal workflow for a hosted/private-beta Chroma Snap service is:
 
 ```yaml
 name: Chroma Snap
@@ -267,32 +209,136 @@ jobs:
           CHROMA_SNAP_SERVICE_URL: ${{ vars.CHROMA_SNAP_SERVICE_URL }}
 ```
 
-Before enforcing PRs, run the workflow on the base branch once to seed baselines. PR builds with no usable baseline should be treated as setup-incomplete until that base-branch seed run exists.
+Before enforcing PR checks, run the workflow on the base branch once to seed baselines. A PR run without a usable base-branch baseline should be treated as setup-incomplete.
 
-## Storybook 10/Vite capture spike
+## Deploy and run a production version
 
-The v1 capture adapter is deliberately isolated in `packages/capture-storybook-vitest`. The real Storybook 10/Vite spike has been validated externally, and the chosen hook is a Vitest browser-mode setup hook: `beforeEach` applies mode context where possible and `afterEach` captures the final rendered state after render/play completion.
+The current code can run as a hosted/private-beta single-node deployment with persistent filesystem storage. It is **not yet production-grade self-hosting**. Before accepting untrusted repositories or private customer screenshots at scale, complete the deferred hardening work: verified GitHub Actions OIDC signatures, required GitHub App installation checks on upload, PostgreSQL adapters, S3-compatible artifact storage, durable queue workers, production OAuth sessions, backups, and lifecycle policies.
 
-The adapter remains intentionally scoped to Storybook 10/Vite and Chromium-only capture for v1. See [`docs/milestone-0-spike.md`](docs/milestone-0-spike.md).
+### 1. Build a release artifact
 
-## V1 workflow target
+```bash
+npm ci
+npm run build
+npm test
+```
 
-1. Install the GitHub App and add the GitHub Action.
-2. The action authenticates with GitHub Actions OIDC, loads `visual.config.ts`, and runs Storybook/Vitest browser-mode capture.
-3. Screenshots and concise logs upload through a scoped upload session.
+Deploy the repository contents, `dist` directories, `package.json`, and `package-lock.json` to a Node 22 runtime. Use a persistent volume for API storage, for example `/var/lib/chroma-snap`.
+
+### 2. Configure the API service
+
+Run the API behind HTTPS, usually behind a reverse proxy or load balancer:
+
+```bash
+HOST=0.0.0.0 \
+PORT=4007 \
+CHROMA_SNAP_PUBLIC_URL=https://snap.example.com \
+CHROMA_SNAP_STORAGE_DIR=/var/lib/chroma-snap \
+CHROMA_SNAP_ARTIFACT_SIGNING_SECRET=<long-random-secret> \
+CHROMA_SNAP_ADMIN_SECRET=<operator-secret> \
+CHROMA_SNAP_GITHUB_WEBHOOK_SECRET=<github-webhook-secret> \
+CHROMA_SNAP_GITHUB_APP_ID=<app-id> \
+CHROMA_SNAP_GITHUB_PRIVATE_KEY="$(cat /run/secrets/chroma-snap-github-app.pem)" \
+CHROMA_SNAP_GITHUB_CHECK_NAME="Chroma Snap Visual Tests" \
+CHROMA_SNAP_OIDC_AUDIENCE=chroma-snap \
+CHROMA_SNAP_METRICS_STDOUT=1 \
+CHROMA_SNAP_REQUEST_LOGS=1 \
+node apps/api/dist/index.js
+```
+
+The current API parses stable GitHub Actions OIDC claims but does not yet verify the JWT signature. For a closed private-beta test only, set `CHROMA_SNAP_ALLOW_UNSIGNED_OIDC=1` to accept those parsed claims while you finish production verification. Do not use that bypass for public or untrusted production traffic.
+
+Health and readiness endpoints:
+
+```text
+GET /health
+GET /ready
+```
+
+Admin endpoints require `CHROMA_SNAP_ADMIN_SECRET` outside development auth:
+
+```bash
+curl -fsS -H "x-chroma-snap-admin-secret: $CHROMA_SNAP_ADMIN_SECRET" \
+  https://snap.example.com/v1/admin/diagnostics
+
+curl -fsS -X POST -H "x-chroma-snap-admin-secret: $CHROMA_SNAP_ADMIN_SECRET" \
+  "https://snap.example.com/v1/admin/cleanup?kind=artifact,comparison,queue-job&dryRun=true"
+```
+
+### 3. Configure the GitHub App
+
+Create a GitHub App with webhook delivery to:
+
+```text
+https://snap.example.com/v1/github/webhooks
+```
+
+Recommended private-beta permissions/events:
+
+- Checks: read/write.
+- Contents: read.
+- Pull requests: read.
+- Metadata: read.
+- Webhook events: `installation`, `installation_repositories`, `pull_request`, and `push`.
+
+Install the app on each repository that will upload snapshots.
+
+### 4. Run diff processing
+
+The API writes file-backed queue records for finalized builds. In the current MVP, durable queue processing is still a deployment seam. For private beta, run a controlled worker process or scheduled job that reads finalized manifests from the API storage directory and calls the worker with the same persistent baseline/report stores.
+
+Example one-shot base-branch seed:
+
+```bash
+node apps/worker/dist/index.js \
+  --manifest /var/lib/chroma-snap/builds/<build-id>/manifest.json \
+  --baseline-file /var/lib/chroma-snap/baselines.json \
+  --output-dir /var/lib/chroma-snap/reports/<build-id> \
+  --seed-baselines
+```
+
+Example PR comparison or base-branch reconciliation:
+
+```bash
+node apps/worker/dist/index.js \
+  --manifest /var/lib/chroma-snap/builds/<build-id>/manifest.json \
+  --baseline-file /var/lib/chroma-snap/baselines.json \
+  --comparison-file /var/lib/chroma-snap/comparisons.json \
+  --review-file /var/lib/chroma-snap/reviews.json \
+  --output-dir /var/lib/chroma-snap/reports/<build-id> \
+  --reconcile-approved
+```
+
+### 5. Run the review UI
+
+```bash
+HOST=0.0.0.0 \
+PORT=4008 \
+CHROMA_SNAP_REPORT_DIR=/var/lib/chroma-snap/reports \
+node apps/web/dist/index.js
+```
+
+Put the review UI behind the same HTTPS boundary as the API, or proxy `/reports` and `/report` to the web process. The static local UI is suitable for private-beta review, while production OAuth-backed sessions remain deferred.
+
+### 6. Operate safely
+
+- Keep `/var/lib/chroma-snap` backed up; it contains local metadata and private artifacts.
+- Ship JSON logs and metrics from stdout to your observability backend.
+- Run cleanup in dry-run mode first, then schedule non-dry-run cleanup once retention behavior is verified.
+- Do not set `CHROMA_SNAP_DEV_AUTH=1` in a hosted environment.
+- Do not expose the upload API to untrusted repositories until OIDC signature verification and GitHub App installation checks are production-grade.
+
+## Review and baseline workflow
+
+1. Install the GitHub App and add the GitHub Actions workflow.
+2. Run on the base branch to create the initial accepted baselines.
+3. Open a PR. CI captures and uploads screenshots.
 4. The worker compares screenshots to accepted base-branch baselines.
-5. The hosted review UI shows changed, new, deleted, errored, pending, and unchanged snapshots.
-6. Authorized GitHub users approve or reject changes.
-7. The GitHub Check remains strict: pending while processing or awaiting approval, success when clean or approved, failure for rejected/capture/error/invalid builds.
-8. Approved PR snapshots are promoted only after the approved commit lands on the base branch and a base-branch run confirms them.
+5. Reviewers approve or reject changed, new, and deleted snapshots.
+6. The GitHub Check passes only when there are no blocking diffs or all required diffs are approved.
+7. Approved PR snapshots become canonical baselines only after the approved commit lands on the base branch and a base-branch run confirms the same snapshot content.
 
-## GitHub App, Checks, and review local seam
-
-Milestones 4 through 7 add webhook ingestion, strict Check Run records, review decisions, audit events, GitHub-permission gates, signed artifact URLs, approved baseline promotion reconciliation, request IDs, typed errors, diagnostics, cleanup, metrics, and private-beta limits. See [`docs/github-app.md`](docs/github-app.md) for the local endpoints, required webhook secret, optional GitHub App environment variables for publishing Checks, and review action auth notes. See [`docs/dogfood-parallel.md`](docs/dogfood-parallel.md) for the parallel Chromatic dogfood rollout notes.
-
-## Private-beta hardening endpoints
-
-Milestone 7 adds local/private-beta operational seams:
+## Operational endpoints
 
 ```text
 GET  /health
@@ -301,29 +347,29 @@ GET  /v1/admin/diagnostics
 POST /v1/admin/cleanup?kind=artifact,comparison,queue-job&before=<ISO>&limit=<N>&dryRun=true
 ```
 
-Outside development auth, admin endpoints require `CHROMA_SNAP_ADMIN_SECRET` via `x-chroma-snap-admin-secret` or a bearer token. Set `CHROMA_SNAP_METRICS_STDOUT=1` to emit JSON-line metrics from the API and worker, and `CHROMA_SNAP_REQUEST_LOGS=1` to emit structured request logs. See [`docs/private-beta-hardening.md`](docs/private-beta-hardening.md) and [`docs/self-hosting.md`](docs/self-hosting.md).
+See `docs/private-beta-hardening.md`, `docs/github-app.md`, `docs/upload-protocol.md`, and `docs/self-hosting.md` for protocol and operations details.
 
 ## Milestone completion map
 
-- **Milestone 0**: Storybook 10/Vite Vitest browser-mode automatic screenshot spike documented in `docs/milestone-0-spike.md`.
-- **Milestone 1**: Local capture, config loading, normalized manifests, named modes, masks, thresholds, fixture capture, and CLI flow.
-- **Milestone 2**: Upload sessions, scoped artifact uploads, manifest finalization, integrity checks, queue records, and PostgreSQL schema contracts.
+- **Milestone 0**: Storybook 10/Vite Vitest browser-mode automatic screenshot spike.
+- **Milestone 1**: Local capture, config loading, manifests, modes, masks, thresholds, fixture capture, and CLI flow.
+- **Milestone 2**: Upload sessions, scoped artifact uploads, manifest finalization, integrity checks, queue records, and schema contracts.
 - **Milestone 3**: Server-side PNG diffing, baseline lookup, comparison reports, new/deleted/errored classification, retry metadata, and retention foundations.
 - **Milestone 4**: GitHub App webhooks, PR/base metadata, refs, strict Check Run records, and GitHub Check publishing seam.
 - **Milestone 5**: Review endpoints, approval/rejection permission gates, audit events, signed private artifact URLs, and HTML review UI.
-- **Milestone 6**: Approved PR baseline promotion after base-branch confirmation, approved deletion retirement, seeding, and dogfood rollout notes.
-- **Milestone 7**: Usage metrics hooks, private-beta limits, cleanup jobs/endpoints, health/readiness/diagnostics, typed errors, observability docs, examples, and future self-hosting migration notes.
+- **Milestone 6**: Approved PR baseline promotion after base-branch confirmation, approved deletion retirement, seeding, and dogfood notes.
+- **Milestone 7**: Usage metrics hooks, private-beta limits, cleanup jobs/endpoints, health/readiness/diagnostics, typed errors, docs, examples, and migration notes.
 
-## What is intentionally deferred
+## Deferred before production-grade self-hosting
 
 - PostgreSQL connection/adapters and automated migration runner.
 - S3-compatible object storage implementation and lifecycle enforcement.
 - Durable queue integration beyond file-backed retry records.
 - Production OAuth session handling for the hosted review UI.
 - Production OIDC signature verification and required GitHub App installation verification on uploads.
-- Full React review UI with keyboard navigation, richer zoom/pan, and threaded review annotations.
+- Full React review UI with richer navigation and annotations.
 - Billing, SSO, SCIM, SOC2 exports, Helm, HA, and supported production self-hosting.
 
 ## License
 
-Apache-2.0. See [`LICENSE`](LICENSE).
+Apache-2.0. See `LICENSE`.
